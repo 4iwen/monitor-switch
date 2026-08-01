@@ -24,11 +24,12 @@ use tao::{
 #[cfg(target_os = "macos")]
 use tray_icon::menu::ContextMenu;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
-use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
+use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use wry::{WebView, WebViewBuilder};
 
 #[derive(Debug, Clone)]
 enum UserEvent {
+    TrayActivated,
     NativeMenu(MenuEvent),
     Ipc(String),
     SwitchFinished {
@@ -36,7 +37,10 @@ enum UserEvent {
         display: String,
         result: std::result::Result<UiState, String>,
     },
-    RefreshFinished(UiState),
+    RefreshFinished {
+        state: UiState,
+        show_menu: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +84,7 @@ struct AppState {
     settings: Option<WindowBundle>,
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
+    menu_refresh_in_flight: bool,
 }
 
 impl AppState {
@@ -90,6 +95,7 @@ impl AppState {
             settings: None,
             ui_state: None,
             native_menu_actions: HashMap::new(),
+            menu_refresh_in_flight: false,
         }
     }
 
@@ -113,8 +119,8 @@ impl AppState {
         self.native_menu_actions = actions;
         tray_builder = tray_builder
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(true)
-            .with_menu_on_right_click(true);
+            .with_menu_on_left_click(false)
+            .with_menu_on_right_click(false);
 
         let tray_icon = tray_builder.build()?;
         configure_macos_tray_symbol(&tray_icon);
@@ -143,7 +149,7 @@ impl AppState {
             } => {
                 self.begin_switch(Some(value), Some(display), profile, proxy);
             }
-            NativeMenuAction::Refresh => self.refresh_async(proxy),
+            NativeMenuAction::Refresh => self.refresh_async(proxy, false),
             NativeMenuAction::OpenSettings => {
                 if let Err(error) = self.open_settings(target, proxy) {
                     eprintln!("failed to open settings: {error}");
@@ -170,7 +176,7 @@ impl AppState {
             }
             IpcCommand::SaveLabels { items } => match self.save_labels(items) {
                 Ok(()) => {
-                    self.refresh_async(proxy);
+                    self.refresh_async(proxy, false);
                     self.evaluate_settings(
                         "window.monitorSwitchSaved && window.monitorSwitchSaved();",
                     );
@@ -333,11 +339,31 @@ impl AppState {
         }
     }
 
-    fn refresh_async(&self, proxy: EventLoopProxy<UserEvent>) {
+    fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>, show_menu: bool) {
+        if show_menu {
+            if self.menu_refresh_in_flight {
+                return;
+            }
+            self.menu_refresh_in_flight = true;
+        }
         let config_path = self.config_path.clone();
         thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::RefreshFinished(build_state(&config_path)));
+            let _ = proxy.send_event(UserEvent::RefreshFinished {
+                state: build_state(&config_path),
+                show_menu,
+            });
         });
+    }
+
+    fn handle_refresh_finished(&mut self, state: UiState, show_menu: bool) {
+        self.ui_state = Some(state);
+        self.render_views();
+        if show_menu {
+            self.menu_refresh_in_flight = false;
+            if let Some(tray_icon) = &self.tray_icon {
+                tray_icon.show_menu();
+            }
+        }
     }
 
     fn evaluate_settings(&self, script: &str) {
@@ -411,6 +437,12 @@ fn main() {
     MenuEvent::set_event_handler(Some(move |event| {
         let _ = menu_proxy.send_event(UserEvent::NativeMenu(event));
     }));
+    let tray_proxy = proxy.clone();
+    TrayIconEvent::set_event_handler(Some(move |event| {
+        if is_tray_activation(&event) {
+            let _ = tray_proxy.send_event(UserEvent::TrayActivated);
+        }
+    }));
 
     let mut state = AppState::new(config_path);
 
@@ -423,6 +455,9 @@ fn main() {
                     eprintln!("failed to initialize app: {error}");
                     *control_flow = ControlFlow::Exit;
                 }
+            }
+            Event::UserEvent(UserEvent::TrayActivated) => {
+                state.refresh_async(proxy.clone(), true);
             }
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
@@ -437,9 +472,11 @@ fn main() {
             }) => {
                 state.handle_switch_finished(value, display, result);
             }
-            Event::UserEvent(UserEvent::RefreshFinished(ui_state)) => {
-                state.ui_state = Some(ui_state);
-                state.render_views();
+            Event::UserEvent(UserEvent::RefreshFinished {
+                state: ui_state,
+                show_menu,
+            }) => {
+                state.handle_refresh_finished(ui_state, show_menu);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -449,6 +486,17 @@ fn main() {
             _ => {}
         }
     });
+}
+
+fn is_tray_activation(event: &TrayIconEvent) -> bool {
+    matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Left | MouseButton::Right,
+            button_state: MouseButtonState::Up,
+            ..
+        }
+    )
 }
 
 #[cfg(target_os = "macos")]

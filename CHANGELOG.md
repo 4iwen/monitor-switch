@@ -24,6 +24,8 @@ All notable changes to Monitor Switch are documented here. The project follows
 - Inputs reported by monitor capabilities are visible by default; generic
   candidates remain hidden until enabled in Settings.
 - The Windows user package now contains one executable named `Monitor Switch.exe`.
+- Opening the tray menu now refreshes VCP `0x60` first, so the current-input
+  checkmark stays accurate after switching away and returning from another device.
 - The tray menu contains configured, monitor-reported, or explicitly enabled
   inputs; the current input remains visible even when disabled.
 - The settings window now uses a compact monitor switcher, source table, native
