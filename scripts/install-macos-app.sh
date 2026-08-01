@@ -12,7 +12,12 @@ DOMAIN="gui/$(id -u)"
 
 "$ROOT_DIR/scripts/build-macos-app.sh" >/dev/null
 mkdir -p "$INSTALL_DIR" "$LAUNCH_AGENTS_DIR"
+launchctl bootout "$DOMAIN"/com.hailong.monitor-switch 2>/dev/null || true
+launchctl bootout "$DOMAIN"/app.monitorswitch.desktop 2>/dev/null || true
+pkill -x monitor-switch-app 2>/dev/null || true
+rm -rf "$INSTALLED_APP"
 ditto "$BUILT_APP" "$INSTALLED_APP"
+rm -rf "$BUILT_APP"
 
 cat > "$PLIST_PATH" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -34,10 +39,7 @@ cat > "$PLIST_PATH" <<PLIST
 PLIST
 
 plutil -lint "$PLIST_PATH" >/dev/null
-launchctl bootout "$DOMAIN"/com.hailong.monitor-switch 2>/dev/null || true
 rm -f "$LAUNCH_AGENTS_DIR/com.hailong.monitor-switch.plist"
-launchctl bootout "$DOMAIN"/app.monitorswitch.desktop 2>/dev/null || true
-pkill -x monitor-switch-app 2>/dev/null || true
 launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
 launchctl kickstart -k "$DOMAIN"/app.monitorswitch.desktop
 
