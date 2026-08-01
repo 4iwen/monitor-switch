@@ -137,7 +137,9 @@ fn monitor_view(
     let profiles = config
         .profiles
         .iter()
-        .filter(|profile| profile_matches_display(profile, selector, display_index, config))
+        .filter(|profile| {
+            profile_matches_display(profile, selector, &descriptor.name, display_index, config)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let current = get_input_source(ReadRequest {
@@ -206,12 +208,24 @@ fn menu_inputs(available_inputs: &[InputView]) -> Vec<InputView> {
 fn profile_matches_display(
     profile: &SourceProfile,
     selector: &str,
+    display_name: &str,
     display_index: usize,
     config: &Config,
 ) -> bool {
     match profile.display.as_deref() {
-        Some(display) => display == selector || (display_index + 1).to_string() == display,
-        None => display_index == 0 || config.default_display.as_deref() == Some(selector),
+        Some(display) => {
+            display == selector
+                || display.eq_ignore_ascii_case(display_name)
+                || (display_index + 1).to_string() == display
+        }
+        None => {
+            display_index == 0
+                || config.default_display.as_deref() == Some(selector)
+                || config
+                    .default_display
+                    .as_deref()
+                    .is_some_and(|display| display.eq_ignore_ascii_case(display_name))
+        }
     }
 }
 
@@ -276,7 +290,9 @@ fn input_view(
         display_selector: display_selector.to_string(),
         icon: icon_name(value).to_string(),
         current: current == Some(value),
-        show_in_menu: profile.is_some_and(|profile| profile.show_in_menu),
+        show_in_menu: profile
+            .map(|profile| profile.show_in_menu)
+            .unwrap_or(reported_supported),
         reported_supported,
         shortcut: if index <= 9 {
             format!("⌘{index}")
@@ -332,7 +348,7 @@ fn backend_label(backend: BackendKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_inputs, profile_matches_display, sort_weight, InputView};
+    use super::{input_view, menu_inputs, profile_matches_display, sort_weight, InputView};
     use crate::config::{BackendKind, Config, SourceProfile};
 
     #[test]
@@ -346,8 +362,20 @@ mod tests {
             show_in_menu: true,
         };
         let config = Config::default();
-        assert!(profile_matches_display(&profile, "A", 0, &config));
-        assert!(!profile_matches_display(&profile, "B", 1, &config));
+        assert!(profile_matches_display(
+            &profile,
+            "A",
+            "Monitor A",
+            0,
+            &config
+        ));
+        assert!(!profile_matches_display(
+            &profile,
+            "B",
+            "Monitor B",
+            1,
+            &config
+        ));
     }
 
     #[test]
@@ -361,8 +389,39 @@ mod tests {
             show_in_menu: true,
         };
         let config = Config::default();
-        assert!(!profile_matches_display(&profile, "display-a", 0, &config));
-        assert!(profile_matches_display(&profile, "display-b", 1, &config));
+        assert!(!profile_matches_display(
+            &profile,
+            "display-a",
+            "Monitor A",
+            0,
+            &config
+        ));
+        assert!(profile_matches_display(
+            &profile,
+            "display-b",
+            "Monitor B",
+            1,
+            &config
+        ));
+    }
+
+    #[test]
+    fn legacy_windows_description_still_matches_display_name() {
+        let profile = SourceProfile {
+            name: "pc".into(),
+            value: 0x11,
+            label: None,
+            display: Some("R27q-30".into()),
+            backend: None,
+            show_in_menu: true,
+        };
+        assert!(profile_matches_display(
+            &profile,
+            r"\\.\DISPLAY1",
+            "R27q-30",
+            0,
+            &Config::default()
+        ));
     }
 
     #[test]
@@ -397,5 +456,25 @@ mod tests {
         assert_eq!(visible.len(), 2);
         assert_eq!(visible[0].value, 0x11);
         assert_eq!(visible[1].value, 0x0f);
+    }
+
+    #[test]
+    fn reported_inputs_are_visible_until_the_user_overrides_them() {
+        let discovered = input_view(1, 0x11, None, "display", &[], true);
+        assert!(discovered.show_in_menu);
+
+        let hidden_profile = SourceProfile {
+            name: "hdmi-1".into(),
+            value: 0x11,
+            label: None,
+            display: Some("display".into()),
+            backend: None,
+            show_in_menu: false,
+        };
+        let hidden = input_view(1, 0x11, None, "display", &[hidden_profile], true);
+        assert!(!hidden.show_in_menu);
+
+        let candidate = input_view(1, 0x12, None, "display", &[], false);
+        assert!(!candidate.show_in_menu);
     }
 }

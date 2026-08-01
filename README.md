@@ -68,8 +68,9 @@ Build a portable ZIP without installing:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 ```
 
-The archive is written to `dist\Monitor-Switch-Windows.zip` and includes both
-the tray application and diagnostic CLI.
+The archive is written to `dist\Monitor-Switch-Windows.zip` and contains one
+user-facing executable, `Monitor Switch.exe`. The diagnostic CLI remains
+available to developers through Cargo but is not included in the user package.
 
 ## First setup
 
@@ -86,8 +87,9 @@ present in the configuration.
 
 DDC/CI can report which inputs a monitor model supports and which input is
 currently active, but it usually cannot report whether a cable is physically
-connected to every inactive port. Monitor Switch therefore keeps unconfigured
-inputs hidden by default and lets each input be shown or hidden in Settings.
+connected to every inactive port. Monitor Switch shows inputs reported by the
+monitor by default, keeps generic fallback candidates hidden, and lets every
+input be shown or hidden in Settings.
 
 ## CLI
 

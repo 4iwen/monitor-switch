@@ -16,6 +16,11 @@ All notable changes to Monitor Switch are documented here. The project follows
 - Removed the custom Windows flyout in favor of operating-system menu behavior,
   positioning, dismissal, focus, shadow, and accessibility.
 - Windows release artifacts now use the same packaging script locally and in CI.
+- Windows display discovery now exposes one responsive DDC/CI device per logical
+  display instead of treating driver-level physical handles as separate screens.
+- Inputs reported by monitor capabilities are visible by default; generic
+  candidates remain hidden until enabled in Settings.
+- The Windows user package now contains one executable named `Monitor Switch.exe`.
 
 ## [0.2.1] - 2026-08-01
 

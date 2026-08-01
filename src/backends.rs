@@ -13,6 +13,8 @@ use crate::{
     error::{AppError, Result},
     sources::{format_input_value, INPUT_SOURCE_VCP_CODE},
 };
+#[cfg(target_os = "windows")]
+use ddc_hi::{Backend, DisplayInfo, Handle};
 use ddc_hi::{Ddc, Display};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,10 +191,82 @@ fn build_action(backend: BackendKind, display: Option<&str>, value: u16) -> Resu
 }
 
 pub fn list_displays() -> Vec<DisplayDescriptor> {
-    Display::enumerate()
+    enumerate_native_displays()
         .into_iter()
         .map(|display| descriptor(&display))
         .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enumerate_native_displays() -> Vec<Display> {
+    Display::enumerate()
+}
+
+#[cfg(target_os = "windows")]
+fn enumerate_native_displays() -> Vec<Display> {
+    let Ok(logical_monitors) = ddc_winapi::enumerate_monitors() else {
+        return Vec::new();
+    };
+
+    logical_monitors
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, logical_monitor)| {
+            let selector = windows_monitor_selector(logical_monitor, index);
+            let physical_monitors =
+                ddc_winapi::get_physical_monitors_from_hmonitor(logical_monitor).ok()?;
+            let monitors = physical_monitors
+                .into_iter()
+                .map(|monitor| unsafe { ddc_winapi::Monitor::new(monitor) });
+
+            for monitor in monitors {
+                let description = monitor.description();
+                let info = DisplayInfo::new(Backend::WinApi, selector.clone());
+                let mut display = Display::new(Handle::WinApi(monitor), info);
+                let reads_input = display
+                    .handle
+                    .get_vcp_feature(INPUT_SOURCE_VCP_CODE)
+                    .is_ok();
+                let reads_capabilities = display.update_capabilities().is_ok();
+
+                if reads_input || reads_capabilities {
+                    if display.info.model_name.is_none() && !description.trim().is_empty() {
+                        display.info.model_name = Some(description);
+                    }
+                    return Some(display);
+                }
+            }
+
+            None
+        })
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn windows_monitor_selector(
+    monitor: winapi::shared::windef::HMONITOR,
+    fallback_index: usize,
+) -> String {
+    use std::mem::{size_of, zeroed};
+    use winapi::shared::minwindef::TRUE;
+    use winapi::um::winuser::{GetMonitorInfoW, LPMONITORINFO, MONITORINFOEXW};
+
+    let mut info = unsafe { zeroed::<MONITORINFOEXW>() };
+    info.cbSize = size_of::<MONITORINFOEXW>() as u32;
+    let read = unsafe { GetMonitorInfoW(monitor, &mut info as *mut _ as LPMONITORINFO) };
+    if read == TRUE {
+        let length = info
+            .szDevice
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(info.szDevice.len());
+        let device = String::from_utf16_lossy(&info.szDevice[..length]);
+        if !device.trim().is_empty() {
+            return device;
+        }
+    }
+
+    format!("windows-display-{}", fallback_index + 1)
 }
 
 fn descriptor(display: &Display) -> DisplayDescriptor {
@@ -224,7 +298,7 @@ fn with_native_display<T>(
     selector: Option<&str>,
     operation: impl FnOnce(&mut Display) -> Result<T>,
 ) -> Result<T> {
-    let mut displays = Display::enumerate();
+    let mut displays = enumerate_native_displays();
     if displays.is_empty() {
         return Err(AppError::NoDisplays);
     }

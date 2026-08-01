@@ -28,6 +28,7 @@ objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 ddc-winapi = "0.2"
+winapi = { version = "0.3", features = ["winuser"] }
 
 [features]
 default = []

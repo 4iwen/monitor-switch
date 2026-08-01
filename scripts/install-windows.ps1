@@ -2,18 +2,19 @@ $ErrorActionPreference = "Stop"
 
 $Root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $InstallDir = Join-Path $env:LOCALAPPDATA "Programs\Monitor Switch"
-$AppPath = Join-Path $InstallDir "monitor-switch-app.exe"
+$AppPath = Join-Path $InstallDir "Monitor Switch.exe"
 $StartupDir = [Environment]::GetFolderPath("Startup")
 $ShortcutPath = Join-Path $StartupDir "Monitor Switch.lnk"
 
 Push-Location $Root
 try {
-    cargo build --release --bin monitor-switch --bin monitor-switch-app
+    cargo build --release --bin monitor-switch-app
 
-    Get-Process "monitor-switch-app" -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process "Monitor Switch", "monitor-switch-app" -ErrorAction SilentlyContinue | Stop-Process -Force
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     Copy-Item "target\release\monitor-switch-app.exe" $AppPath -Force
-    Copy-Item "target\release\monitor-switch.exe" $InstallDir -Force
+    Remove-Item (Join-Path $InstallDir "monitor-switch-app.exe") -Force -ErrorAction SilentlyContinue
+    Remove-Item (Join-Path $InstallDir "monitor-switch.exe") -Force -ErrorAction SilentlyContinue
     Copy-Item "README.md" $InstallDir -Force
     Copy-Item "LICENSE" $InstallDir -Force
 
