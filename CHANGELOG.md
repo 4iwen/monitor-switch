@@ -3,10 +3,13 @@
 All notable changes to Monitor Switch are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.1] - 2026-08-01
 
 ### Added
 
+- Per-input `show-in-menu` preference for every display.
+- Monitor capability labels that distinguish reported inputs from fallback
+  candidates.
 - Native Windows system-tray context menu with current-input checkmarks.
 - Windows build and per-user installation scripts, including optional login
   startup and a console-free desktop executable.
@@ -21,23 +24,12 @@ All notable changes to Monitor Switch are documented here. The project follows
 - Inputs reported by monitor capabilities are visible by default; generic
   candidates remain hidden until enabled in Settings.
 - The Windows user package now contains one executable named `Monitor Switch.exe`.
-
-## [0.2.1] - 2026-08-01
-
-### Added
-
-- Per-input `show-in-menu` preference for every display.
-- Monitor capability labels that distinguish reported inputs from fallback
-  candidates.
-
-### Changed
-
-- The tray menu now contains configured or explicitly enabled inputs only; the
-  current input remains visible even when disabled.
+- The tray menu contains configured, monitor-reported, or explicitly enabled
+  inputs; the current input remains visible even when disabled.
 - The settings window now uses a compact monitor switcher, source table, native
   style toggles, and a denser macOS layout.
-- Existing profiles remain visible after upgrade, while unconfigured candidates
-  start hidden.
+- Existing profiles remain visible after upgrade, while generic fallback
+  candidates start hidden.
 
 ## [0.2.0] - 2026-08-01
 
