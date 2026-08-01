@@ -69,6 +69,7 @@ struct LabelUpdate {
     display: String,
     display_index: usize,
     label: String,
+    show_in_menu: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,10 +301,15 @@ impl AppState {
                         if monitor.selector == display_for_event {
                             monitor.current_value = Some(value);
                             monitor.current_hex = Some(format!("0x{value:02x}"));
-                            for input in &mut monitor.inputs {
+                            for input in &mut monitor.available_inputs {
                                 input.current = input.value == value;
                             }
-                            monitor.available_inputs = monitor.inputs.clone();
+                            monitor.inputs = monitor
+                                .available_inputs
+                                .iter()
+                                .filter(|input| input.show_in_menu || input.current)
+                                .cloned()
+                                .collect();
                         }
                     }
                     if let Some(first) = state.monitors.first().cloned() {
@@ -364,8 +370,10 @@ impl AppState {
                         None => item.display_index == 0,
                     }
             }) {
-                profile.label = (!label.is_empty()).then(|| label.to_string());
-            } else if !label.is_empty() {
+                profile.label = custom_label(item.value, label);
+                profile.show_in_menu = item.show_in_menu;
+                profile.display = (!item.display.is_empty()).then_some(item.display.clone());
+            } else if item.show_in_menu || custom_label(item.value, label).is_some() {
                 config.profiles.push(SourceProfile {
                     name: if item.display_index == 0 {
                         format!("input-{:02x}", item.value)
@@ -377,9 +385,10 @@ impl AppState {
                         )
                     },
                     value: item.value,
-                    label: Some(label.to_string()),
+                    label: custom_label(item.value, label),
                     display: (!item.display.is_empty()).then_some(item.display.clone()),
                     backend: Some(monitor_switch::config::BackendKind::Native),
+                    show_in_menu: item.show_in_menu,
                 });
             }
         }
@@ -496,6 +505,12 @@ impl AppState {
             }
         }
     }
+}
+
+fn custom_label(value: u16, label: &str) -> Option<String> {
+    let label = label.trim();
+    (!label.is_empty() && label != monitor_switch::ui::physical_name(value))
+        .then(|| label.to_string())
 }
 
 fn migrate_legacy_config(config_path: &Path) -> Result<()> {
@@ -856,7 +871,12 @@ fn build_webview(
             .with_transparent(true)
             .with_background_color((0, 0, 0, 0))
     } else {
-        builder.with_background_color((243, 243, 243, 255))
+        let background = if cfg!(target_os = "macos") {
+            (236, 236, 236, 255)
+        } else {
+            (243, 243, 243, 255)
+        };
+        builder.with_background_color(background)
     };
     builder.build(window)
 }
@@ -893,7 +913,7 @@ fn settings_dimensions() -> (f64, f64) {
     if cfg!(target_os = "windows") {
         (680.0, 460.0)
     } else {
-        (620.0, 430.0)
+        (660.0, 500.0)
     }
 }
 

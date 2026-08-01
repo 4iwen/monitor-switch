@@ -3,7 +3,10 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::{
-    backends::{get_input_source, list_displays, DisplayDescriptor, ReadRequest},
+    backends::{
+        get_input_source, get_supported_input_sources, list_displays, DisplayDescriptor,
+        ReadRequest,
+    },
     config::{BackendKind, Config, SourceProfile},
     sources::{format_input_value, COMMON_INPUT_CANDIDATES},
 };
@@ -61,6 +64,8 @@ pub struct InputView {
     pub display_selector: String,
     pub icon: String,
     pub current: bool,
+    pub show_in_menu: bool,
+    pub reported_supported: bool,
     pub shortcut: String,
 }
 
@@ -140,18 +145,43 @@ fn monitor_view(
         display: (!selector.is_empty()).then_some(selector),
     })
     .ok();
-    let values = merge_values(
+    let supported = get_supported_input_sources(ReadRequest {
+        backend: config.default_backend,
+        display: (!selector.is_empty()).then_some(selector),
+    })
+    .unwrap_or_default();
+    let available_values = merge_values(
         &COMMON_INPUT_CANDIDATES
             .iter()
             .map(|candidate| candidate.value)
             .collect::<Vec<_>>(),
         &profiles,
     );
-    let inputs = values
+    let mut available_inputs = available_values
         .iter()
         .enumerate()
-        .map(|(index, value)| input_view(index + 1, *value, current, selector, &profiles))
+        .map(|(index, value)| {
+            input_view(
+                index + 1,
+                *value,
+                current,
+                selector,
+                &profiles,
+                supported.contains(value),
+            )
+        })
         .collect::<Vec<_>>();
+    available_inputs.sort_by_key(|input| {
+        let group = if input.profile_name.is_some() {
+            0
+        } else if input.reported_supported {
+            1
+        } else {
+            2
+        };
+        (group, sort_weight(input.value))
+    });
+    let inputs = menu_inputs(&available_inputs);
 
     MonitorView {
         selector: selector.to_string(),
@@ -160,9 +190,17 @@ fn monitor_view(
         current_value: current,
         current_hex: current.map(format_input_value),
         connected: current.is_some(),
-        inputs: inputs.clone(),
-        available_inputs: inputs,
+        inputs,
+        available_inputs,
     }
+}
+
+fn menu_inputs(available_inputs: &[InputView]) -> Vec<InputView> {
+    available_inputs
+        .iter()
+        .filter(|input| input.show_in_menu || input.current)
+        .cloned()
+        .collect()
 }
 
 fn profile_matches_display(
@@ -219,6 +257,7 @@ fn input_view(
     current: Option<u16>,
     display_selector: &str,
     profiles: &[SourceProfile],
+    reported_supported: bool,
 ) -> InputView {
     let profile = profiles.iter().find(|profile| profile.value == value);
     let physical_name = physical_name(value);
@@ -237,6 +276,8 @@ fn input_view(
         display_selector: display_selector.to_string(),
         icon: icon_name(value).to_string(),
         current: current == Some(value),
+        show_in_menu: profile.is_some_and(|profile| profile.show_in_menu),
+        reported_supported,
         shortcut: if index <= 9 {
             format!("⌘{index}")
         } else {
@@ -291,7 +332,7 @@ fn backend_label(backend: BackendKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{profile_matches_display, sort_weight};
+    use super::{menu_inputs, profile_matches_display, sort_weight, InputView};
     use crate::config::{BackendKind, Config, SourceProfile};
 
     #[test]
@@ -302,6 +343,7 @@ mod tests {
             label: None,
             display: None,
             backend: None,
+            show_in_menu: true,
         };
         let config = Config::default();
         assert!(profile_matches_display(&profile, "A", 0, &config));
@@ -316,6 +358,7 @@ mod tests {
             label: None,
             display: Some("display-b".into()),
             backend: Some(BackendKind::Native),
+            show_in_menu: true,
         };
         let config = Config::default();
         assert!(!profile_matches_display(&profile, "display-a", 0, &config));
@@ -326,5 +369,33 @@ mod tests {
     fn common_ports_have_stable_menu_order() {
         assert!(sort_weight(0x1b) < sort_weight(0x11));
         assert!(sort_weight(0x13) < sort_weight(0x0f));
+    }
+
+    #[test]
+    fn menu_hides_candidates_but_keeps_the_current_input() {
+        let input = |value, show_in_menu, current| InputView {
+            index: 1,
+            name: "Input".into(),
+            subtitle: "HDMI".into(),
+            value,
+            hex: format!("0x{value:02x}"),
+            profile_name: None,
+            display_selector: "display".into(),
+            icon: "hdmi".into(),
+            current,
+            show_in_menu,
+            reported_supported: true,
+            shortcut: String::new(),
+        };
+        let available = vec![
+            input(0x11, true, false),
+            input(0x12, false, false),
+            input(0x0f, false, true),
+        ];
+
+        let visible = menu_inputs(&available);
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].value, 0x11);
+        assert_eq!(visible[1].value, 0x0f);
     }
 }

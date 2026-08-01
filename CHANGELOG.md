@@ -3,6 +3,23 @@
 All notable changes to Monitor Switch are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-08-01
+
+### Added
+
+- Per-input `show-in-menu` preference for every display.
+- Monitor capability labels that distinguish reported inputs from fallback
+  candidates.
+
+### Changed
+
+- The tray menu now contains configured or explicitly enabled inputs only; the
+  current input remains visible even when disabled.
+- The settings window now uses a compact monitor switcher, source table, native
+  style toggles, and a denser macOS layout.
+- Existing profiles remain visible after upgrade, while unconfigured candidates
+  start hidden.
+
 ## [0.2.0] - 2026-08-01
 
 ### Added

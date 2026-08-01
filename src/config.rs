@@ -37,6 +37,9 @@ pub struct SourceProfile {
 
     #[serde(default)]
     pub backend: Option<BackendKind>,
+
+    #[serde(default = "default_true")]
+    pub show_in_menu: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -147,6 +150,10 @@ fn legacy_schema_version() -> u8 {
     1
 }
 
+fn default_true() -> bool {
+    true
+}
+
 fn migrate_selector(selector: Option<String>, displays: &[String]) -> Option<String> {
     let first = displays.first().cloned();
     match selector
@@ -208,6 +215,7 @@ mod tests {
                 label: None,
                 display: None,
                 backend: Some(BackendKind::Ddcctl),
+                show_in_menu: true,
             }],
         };
 
@@ -227,6 +235,7 @@ mod tests {
                 label: None,
                 display: Some("2".to_string()),
                 backend: None,
+                show_in_menu: true,
             }],
         };
 
@@ -253,5 +262,20 @@ backend = "better-display"
         assert_eq!(config.profiles[0].display.as_deref(), Some("R27q-30"));
         assert_eq!(config.profiles[0].backend, None);
         assert!(!config.migrate_to_native(&["other".to_string()]));
+    }
+
+    #[test]
+    fn existing_profiles_remain_visible_when_visibility_is_missing() {
+        let config: Config = toml::from_str(
+            r#"
+schema-version = 2
+[[profiles]]
+name = "pc"
+value = 17
+"#,
+        )
+        .unwrap();
+
+        assert!(config.profiles[0].show_in_menu);
     }
 }

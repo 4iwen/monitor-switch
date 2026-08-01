@@ -14,6 +14,7 @@ account, analytics, or background polling.
 - Native macOS menu and platform-specific Windows flyout
 - One-click switching between named inputs
 - Multiple monitors with independent input names
+- Per-input control over which sources appear in the tray menu
 - Automatic current-input checkmark when the display supports reading VCP `0x60`
 - CLI for discovery, diagnostics, and scripts
 - Compatibility backends for unusual monitor, dock, and GPU combinations
@@ -59,6 +60,11 @@ open "dist/Monitor Switch.app"
 Monitor input values are not perfectly consistent between manufacturers. The
 settings window includes the common MCCS values and keeps custom values already
 present in the configuration.
+
+DDC/CI can report which inputs a monitor model supports and which input is
+currently active, but it usually cannot report whether a cable is physically
+connected to every inactive port. Monitor Switch therefore keeps unconfigured
+inputs hidden by default and lets each input be shown or hidden in Settings.
 
 ## CLI
 

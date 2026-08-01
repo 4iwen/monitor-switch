@@ -203,6 +203,7 @@ fn run() -> Result<()> {
                 label,
                 display,
                 backend: backend.as_deref().map(BackendKind::parse).transpose()?,
+                show_in_menu: true,
             };
 
             config.profiles.push(profile);
