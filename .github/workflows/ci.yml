@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [macos-14, windows-2022]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test --all-targets
+
+  macos-app:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: ./scripts/build-macos-app.sh
+      - run: ditto -c -k --keepParent "dist/Monitor Switch.app" dist/Monitor-Switch-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monitor-Switch-macOS
+          path: dist/Monitor-Switch-macOS.zip
+
+  windows-app:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --bin monitor-switch --bin monitor-switch-app
+      - shell: pwsh
+        run: Compress-Archive -Path target/release/monitor-switch.exe,target/release/monitor-switch-app.exe -DestinationPath Monitor-Switch-Windows.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Monitor-Switch-Windows
+          path: Monitor-Switch-Windows.zip
