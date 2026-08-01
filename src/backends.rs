@@ -215,29 +215,16 @@ fn enumerate_native_displays() -> Vec<Display> {
             let selector = windows_monitor_selector(logical_monitor, index);
             let physical_monitors =
                 ddc_winapi::get_physical_monitors_from_hmonitor(logical_monitor).ok()?;
-            let monitors = physical_monitors
+            let monitor = physical_monitors
                 .into_iter()
-                .map(|monitor| unsafe { ddc_winapi::Monitor::new(monitor) });
-
-            for monitor in monitors {
-                let description = monitor.description();
-                let info = DisplayInfo::new(Backend::WinApi, selector.clone());
-                let mut display = Display::new(Handle::WinApi(monitor), info);
-                let reads_input = display
-                    .handle
-                    .get_vcp_feature(INPUT_SOURCE_VCP_CODE)
-                    .is_ok();
-                let reads_capabilities = display.update_capabilities().is_ok();
-
-                if reads_input || reads_capabilities {
-                    if display.info.model_name.is_none() && !description.trim().is_empty() {
-                        display.info.model_name = Some(description);
-                    }
-                    return Some(display);
-                }
+                .next()
+                .map(|monitor| unsafe { ddc_winapi::Monitor::new(monitor) })?;
+            let description = monitor.description();
+            let mut info = DisplayInfo::new(Backend::WinApi, selector);
+            if !description.trim().is_empty() {
+                info.model_name = Some(description);
             }
-
-            None
+            Some(Display::new(Handle::WinApi(monitor), info))
         })
         .collect()
 }

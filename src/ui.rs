@@ -85,8 +85,23 @@ pub fn build_state(config_path: &Path) -> UiState {
     let monitors = descriptors
         .iter()
         .enumerate()
-        .map(|(index, descriptor)| monitor_view(descriptor, index, &config))
+        .map(|(index, descriptor)| monitor_view(descriptor, index, &config, true))
         .collect::<Vec<_>>();
+    assemble_state(config_path, config, monitors)
+}
+
+pub fn build_cached_state(config_path: &Path) -> UiState {
+    let config = Config::load(config_path).unwrap_or_default();
+    let descriptors = configured_displays(&config);
+    let monitors = descriptors
+        .iter()
+        .enumerate()
+        .map(|(index, descriptor)| monitor_view(descriptor, index, &config, false))
+        .collect::<Vec<_>>();
+    assemble_state(config_path, config, monitors)
+}
+
+fn assemble_state(config_path: &Path, config: Config, monitors: Vec<MonitorView>) -> UiState {
     let monitor = monitors.first().cloned().unwrap_or_else(empty_monitor);
 
     UiState {
@@ -103,6 +118,40 @@ pub fn build_state(config_path: &Path) -> UiState {
         backend: backend_label(config.default_backend).to_string(),
         operation: OperationView::default(),
     }
+}
+
+fn configured_displays(config: &Config) -> Vec<DisplayDescriptor> {
+    let mut selectors = Vec::new();
+    if let Some(selector) = config.default_display.as_deref() {
+        if !selector.trim().is_empty() {
+            selectors.push(selector.to_string());
+        }
+    }
+    for selector in config
+        .profiles
+        .iter()
+        .filter_map(|profile| profile.display.as_deref())
+    {
+        if !selector.trim().is_empty() && !selectors.iter().any(|value| value == selector) {
+            selectors.push(selector.to_string());
+        }
+    }
+    if selectors.is_empty() {
+        selectors.push(String::new());
+    }
+
+    selectors
+        .into_iter()
+        .map(|selector| DisplayDescriptor {
+            name: if selector.is_empty() {
+                "External Display".to_string()
+            } else {
+                selector.clone()
+            },
+            selector,
+            detail: "Detecting DDC/CI display…".to_string(),
+        })
+        .collect()
 }
 
 fn discovered_or_configured_displays(config: &Config) -> Vec<DisplayDescriptor> {
@@ -132,6 +181,7 @@ fn monitor_view(
     descriptor: &DisplayDescriptor,
     display_index: usize,
     config: &Config,
+    probe_hardware: bool,
 ) -> MonitorView {
     let selector = descriptor.selector.as_str();
     let profiles = config
@@ -142,16 +192,22 @@ fn monitor_view(
         })
         .cloned()
         .collect::<Vec<_>>();
-    let current = get_input_source(ReadRequest {
-        backend: config.default_backend,
-        display: (!selector.is_empty()).then_some(selector),
-    })
-    .ok();
-    let supported = get_supported_input_sources(ReadRequest {
-        backend: config.default_backend,
-        display: (!selector.is_empty()).then_some(selector),
-    })
-    .unwrap_or_default();
+    let (current, supported) = if probe_hardware {
+        (
+            get_input_source(ReadRequest {
+                backend: config.default_backend,
+                display: (!selector.is_empty()).then_some(selector),
+            })
+            .ok(),
+            get_supported_input_sources(ReadRequest {
+                backend: config.default_backend,
+                display: (!selector.is_empty()).then_some(selector),
+            })
+            .unwrap_or_default(),
+        )
+    } else {
+        (None, Vec::new())
+    };
     let available_values = merge_values(
         &COMMON_INPUT_CANDIDATES
             .iter()
@@ -348,7 +404,12 @@ fn backend_label(backend: BackendKind) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{input_view, menu_inputs, profile_matches_display, sort_weight, InputView};
+    use std::path::Path;
+
+    use super::{
+        build_cached_state, input_view, menu_inputs, profile_matches_display, sort_weight,
+        InputView,
+    };
     use crate::config::{BackendKind, Config, SourceProfile};
 
     #[test]
@@ -476,5 +537,13 @@ mod tests {
 
         let candidate = input_view(1, 0x12, None, "display", &[], false);
         assert!(!candidate.show_in_menu);
+    }
+
+    #[test]
+    fn cached_state_is_available_without_display_io() {
+        let state = build_cached_state(Path::new("/path/that/does/not/exist/config.toml"));
+        assert_eq!(state.monitors.len(), 1);
+        assert!(!state.monitor.connected);
+        assert!(!state.available_inputs.is_empty());
     }
 }

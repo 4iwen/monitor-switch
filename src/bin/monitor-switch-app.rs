@@ -9,10 +9,10 @@ use std::{
 
 use monitor_switch::{
     app_html::settings_html,
-    backends::{set_input_source, SwitchRequest},
+    backends::{get_input_source, set_input_source, ReadRequest, SwitchRequest},
     config::{default_config_path, Config, SourceProfile},
     error::Result,
-    ui::{build_state, OperationStatus, UiState},
+    ui::{build_cached_state, build_state, OperationStatus, UiState},
 };
 use serde::Deserialize;
 use tao::{
@@ -30,24 +30,17 @@ use wry::{WebView, WebViewBuilder};
 #[derive(Debug, Clone)]
 enum UserEvent {
     TrayActivated,
+    #[cfg(target_os = "windows")]
+    PrewarmSettings,
     NativeMenu(MenuEvent),
     Ipc(String),
     SwitchFinished {
         value: u16,
         display: String,
-        result: std::result::Result<UiState, String>,
+        result: std::result::Result<(), String>,
     },
-    RefreshFinished {
-        state: UiState,
-        mode: RefreshMode,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RefreshMode {
-    Rebuild,
-    SyncOpenMenu,
-    OpenMenu,
+    RefreshFinished(Box<UiState>),
+    CurrentInputsRefreshed(Vec<(String, Option<u16>)>),
 }
 
 #[derive(Debug, Clone)]
@@ -92,7 +85,6 @@ struct AppState {
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
     native_input_items: HashMap<String, CheckMenuItem>,
-    menu_refresh_in_flight: bool,
 }
 
 impl AppState {
@@ -104,7 +96,6 @@ impl AppState {
             ui_state: None,
             native_menu_actions: HashMap::new(),
             native_input_items: HashMap::new(),
-            menu_refresh_in_flight: false,
         }
     }
 
@@ -113,12 +104,12 @@ impl AppState {
         target: &EventLoopWindowTarget<UserEvent>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> std::result::Result<(), Box<dyn Error>> {
-        let _ = (target, &proxy);
+        let _ = target;
         configure_macos_application();
         if let Err(error) = migrate_legacy_config(&self.config_path) {
             eprintln!("failed to migrate legacy configuration: {error}");
         }
-        let state = build_state(&self.config_path);
+        let state = build_cached_state(&self.config_path);
         let mut tray_builder = TrayIconBuilder::new()
             .with_tooltip("Monitor Switch")
             .with_icon(build_icon()?)
@@ -129,14 +120,20 @@ impl AppState {
         self.native_input_items = input_items;
         tray_builder = tray_builder
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(cfg!(target_os = "macos"))
-            .with_menu_on_right_click(cfg!(target_os = "macos"));
+            .with_menu_on_left_click(true)
+            .with_menu_on_right_click(true);
 
         let tray_icon = tray_builder.build()?;
         configure_macos_tray_symbol(&tray_icon);
         self.tray_icon = Some(tray_icon);
 
         self.ui_state = Some(state);
+        self.refresh_async(proxy.clone());
+        #[cfg(target_os = "windows")]
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(2_500));
+            let _ = proxy.send_event(UserEvent::PrewarmSettings);
+        });
         Ok(())
     }
 
@@ -159,7 +156,7 @@ impl AppState {
             } => {
                 self.begin_switch(Some(value), Some(display), profile, proxy);
             }
-            NativeMenuAction::Refresh => self.refresh_async(proxy, RefreshMode::Rebuild),
+            NativeMenuAction::Refresh => self.refresh_async(proxy),
             NativeMenuAction::OpenSettings => {
                 if let Err(error) = self.open_settings(target, proxy) {
                     eprintln!("failed to open settings: {error}");
@@ -186,7 +183,7 @@ impl AppState {
             }
             IpcCommand::SaveLabels { items } => match self.save_labels(items) {
                 Ok(()) => {
-                    self.refresh_async(proxy, RefreshMode::Rebuild);
+                    self.refresh_async(proxy);
                     self.evaluate_settings(
                         "window.monitorSwitchSaved && window.monitorSwitchSaved();",
                     );
@@ -232,33 +229,7 @@ impl AppState {
         thread::spawn(move || {
             let display_for_event = display.clone().unwrap_or_default();
             let result = switch_input(&config_path, value, display, profile)
-                .map(|_| {
-                    let mut state = build_state(&config_path);
-                    for monitor in &mut state.monitors {
-                        if monitor.selector == display_for_event {
-                            monitor.current_value = Some(value);
-                            monitor.current_hex = Some(format!("0x{value:02x}"));
-                            for input in &mut monitor.available_inputs {
-                                input.current = input.value == value;
-                            }
-                            monitor.inputs = monitor
-                                .available_inputs
-                                .iter()
-                                .filter(|input| input.show_in_menu || input.current)
-                                .cloned()
-                                .collect();
-                        }
-                    }
-                    if let Some(first) = state.monitors.first().cloned() {
-                        state.monitor = first.clone();
-                        state.inputs = first.inputs;
-                        state.available_inputs = first.available_inputs;
-                    }
-                    state.operation.status = OperationStatus::Success;
-                    state.operation.target_value = Some(value);
-                    state.operation.target_display = Some(display_for_event.clone());
-                    state
-                })
+                .map(|_| ())
                 .map_err(|error| error.to_string());
             let _ = proxy.send_event(UserEvent::SwitchFinished {
                 value,
@@ -266,6 +237,24 @@ impl AppState {
                 result,
             });
         });
+    }
+
+    #[cfg(target_os = "windows")]
+    fn prewarm_settings(
+        &mut self,
+        target: &EventLoopWindowTarget<UserEvent>,
+        proxy: EventLoopProxy<UserEvent>,
+    ) {
+        if self.settings.is_some() {
+            return;
+        }
+        let Some(state) = self.ui_state.as_ref() else {
+            return;
+        };
+        match create_settings(target, proxy, state) {
+            Ok(settings) => self.settings = Some(settings),
+            Err(error) => eprintln!("failed to prewarm settings: {error}"),
+        }
     }
 
     fn open_settings(
@@ -350,39 +339,78 @@ impl AppState {
         }
     }
 
-    fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>, mode: RefreshMode) {
-        if mode == RefreshMode::OpenMenu {
-            if self.menu_refresh_in_flight {
-                return;
-            }
-            self.menu_refresh_in_flight = true;
-        }
+    fn refresh_async(&self, proxy: EventLoopProxy<UserEvent>) {
         let config_path = self.config_path.clone();
         thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::RefreshFinished {
-                state: build_state(&config_path),
-                mode,
-            });
+            let _ = proxy.send_event(UserEvent::RefreshFinished(Box::new(build_state(
+                &config_path,
+            ))));
         });
     }
 
-    fn handle_refresh_finished(&mut self, state: UiState, mode: RefreshMode) {
+    fn refresh_current_inputs_async(&self, proxy: EventLoopProxy<UserEvent>) {
+        let config_path = self.config_path.clone();
+        let displays = self
+            .ui_state
+            .as_ref()
+            .map(|state| {
+                state
+                    .monitors
+                    .iter()
+                    .map(|monitor| monitor.selector.clone())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        thread::spawn(move || {
+            let config = Config::load(&config_path).unwrap_or_default();
+            let values = displays
+                .into_iter()
+                .map(|display| {
+                    let current = get_input_source(ReadRequest {
+                        backend: config.default_backend,
+                        display: (!display.is_empty()).then_some(display.as_str()),
+                    })
+                    .ok();
+                    (display, current)
+                })
+                .collect();
+            let _ = proxy.send_event(UserEvent::CurrentInputsRefreshed(values));
+        });
+    }
+
+    fn handle_refresh_finished(&mut self, state: UiState) {
         self.ui_state = Some(state);
-        match mode {
-            RefreshMode::Rebuild => self.render_views(),
-            RefreshMode::SyncOpenMenu => {
-                self.sync_native_input_items();
-                if let (Some(settings), Some(state)) = (&self.settings, &self.ui_state) {
-                    refresh_webview(&settings.webview, state);
+        self.render_views();
+    }
+
+    fn handle_current_inputs_refreshed(&mut self, values: Vec<(String, Option<u16>)>) {
+        let Some(state) = &mut self.ui_state else {
+            return;
+        };
+        for (display, current) in values {
+            if let Some(monitor) = state
+                .monitors
+                .iter_mut()
+                .find(|monitor| monitor.selector == display)
+            {
+                monitor.current_value = current;
+                monitor.current_hex = current.map(|value| format!("0x{value:02x}"));
+                monitor.connected = current.is_some();
+                for input in &mut monitor.available_inputs {
+                    input.current = current == Some(input.value);
                 }
+                monitor.inputs = monitor
+                    .available_inputs
+                    .iter()
+                    .filter(|input| input.show_in_menu || input.current)
+                    .cloned()
+                    .collect();
             }
-            RefreshMode::OpenMenu => {
-                self.render_views();
-                self.menu_refresh_in_flight = false;
-                if let Some(tray_icon) = &self.tray_icon {
-                    tray_icon.show_menu();
-                }
-            }
+        }
+        sync_primary_monitor(state);
+        self.sync_native_input_items();
+        if let (Some(settings), Some(state)) = (&self.settings, &self.ui_state) {
+            refresh_webview(&settings.webview, state);
         }
     }
 
@@ -413,10 +441,33 @@ impl AppState {
         &mut self,
         value: u16,
         display: String,
-        result: std::result::Result<UiState, String>,
+        result: std::result::Result<(), String>,
     ) {
         match result {
-            Ok(state) => self.ui_state = Some(state),
+            Ok(()) => {
+                if let Some(state) = &mut self.ui_state {
+                    for monitor in &mut state.monitors {
+                        if monitor.selector == display {
+                            monitor.current_value = Some(value);
+                            monitor.current_hex = Some(format!("0x{value:02x}"));
+                            monitor.connected = true;
+                            for input in &mut monitor.available_inputs {
+                                input.current = input.value == value;
+                            }
+                            monitor.inputs = monitor
+                                .available_inputs
+                                .iter()
+                                .filter(|input| input.show_in_menu || input.current)
+                                .cloned()
+                                .collect();
+                        }
+                    }
+                    sync_primary_monitor(state);
+                    state.operation.status = OperationStatus::Success;
+                    state.operation.target_value = Some(value);
+                    state.operation.target_display = Some(display);
+                }
+            }
             Err(message) => {
                 if let Some(state) = &mut self.ui_state {
                     state.operation.status = OperationStatus::Error;
@@ -438,6 +489,14 @@ impl AppState {
         }
 
         *control_flow = ControlFlow::Exit;
+    }
+}
+
+fn sync_primary_monitor(state: &mut UiState) {
+    if let Some(first) = state.monitors.first().cloned() {
+        state.monitor = first.clone();
+        state.inputs = first.inputs;
+        state.available_inputs = first.available_inputs;
     }
 }
 
@@ -494,12 +553,11 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::TrayActivated) => {
-                let mode = if cfg!(target_os = "macos") {
-                    RefreshMode::SyncOpenMenu
-                } else {
-                    RefreshMode::OpenMenu
-                };
-                state.refresh_async(proxy.clone(), mode);
+                state.refresh_current_inputs_async(proxy.clone());
+            }
+            #[cfg(target_os = "windows")]
+            Event::UserEvent(UserEvent::PrewarmSettings) => {
+                state.prewarm_settings(target, proxy.clone());
             }
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
@@ -514,11 +572,11 @@ fn main() {
             }) => {
                 state.handle_switch_finished(value, display, result);
             }
-            Event::UserEvent(UserEvent::RefreshFinished {
-                state: ui_state,
-                mode,
-            }) => {
-                state.handle_refresh_finished(ui_state, mode);
+            Event::UserEvent(UserEvent::RefreshFinished(ui_state)) => {
+                state.handle_refresh_finished(*ui_state);
+            }
+            Event::UserEvent(UserEvent::CurrentInputsRefreshed(values)) => {
+                state.handle_current_inputs_refreshed(values);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -530,25 +588,12 @@ fn main() {
     });
 }
 
-#[cfg(target_os = "macos")]
 fn is_tray_activation(event: &TrayIconEvent) -> bool {
     matches!(
         event,
         TrayIconEvent::Click {
             button: MouseButton::Left | MouseButton::Right,
             button_state: MouseButtonState::Down,
-            ..
-        }
-    )
-}
-
-#[cfg(target_os = "windows")]
-fn is_tray_activation(event: &TrayIconEvent) -> bool {
-    matches!(
-        event,
-        TrayIconEvent::Click {
-            button: MouseButton::Left | MouseButton::Right,
-            button_state: MouseButtonState::Up,
             ..
         }
     )

@@ -28,6 +28,11 @@ All notable changes to Monitor Switch are documented here. The project follows
   checkmark stays accurate after switching away and returning from another device.
 - macOS opens its AppKit menu immediately and applies the refreshed checkmark to
   the live menu instead of waiting for DDC/CI before showing it.
+- Windows now creates the tray icon from cached configuration before starting
+  DDC/CI discovery, opens the native menu immediately, and refreshes only VCP
+  `0x60` on tray clicks instead of re-reading the full capabilities string.
+- The Windows settings WebView2 window is prewarmed shortly after startup to
+  reduce the first-open delay.
 - The tray menu contains configured, monitor-reported, or explicitly enabled
   inputs; the current input remains visible even when disabled.
 - The settings window now uses a compact monitor switcher, source table, native
