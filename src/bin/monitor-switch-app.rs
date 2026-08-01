@@ -39,8 +39,15 @@ enum UserEvent {
     },
     RefreshFinished {
         state: UiState,
-        show_menu: bool,
+        mode: RefreshMode,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefreshMode {
+    Rebuild,
+    SyncOpenMenu,
+    OpenMenu,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +91,7 @@ struct AppState {
     settings: Option<WindowBundle>,
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
+    native_input_items: HashMap<String, CheckMenuItem>,
     menu_refresh_in_flight: bool,
 }
 
@@ -95,6 +103,7 @@ impl AppState {
             settings: None,
             ui_state: None,
             native_menu_actions: HashMap::new(),
+            native_input_items: HashMap::new(),
             menu_refresh_in_flight: false,
         }
     }
@@ -115,12 +124,13 @@ impl AppState {
             .with_icon(build_icon()?)
             .with_icon_as_template(true);
 
-        let (menu, actions) = build_native_menu(&state);
+        let (menu, actions, input_items) = build_native_menu(&state);
         self.native_menu_actions = actions;
+        self.native_input_items = input_items;
         tray_builder = tray_builder
             .with_menu(Box::new(menu))
-            .with_menu_on_left_click(false)
-            .with_menu_on_right_click(false);
+            .with_menu_on_left_click(cfg!(target_os = "macos"))
+            .with_menu_on_right_click(cfg!(target_os = "macos"));
 
         let tray_icon = tray_builder.build()?;
         configure_macos_tray_symbol(&tray_icon);
@@ -149,7 +159,7 @@ impl AppState {
             } => {
                 self.begin_switch(Some(value), Some(display), profile, proxy);
             }
-            NativeMenuAction::Refresh => self.refresh_async(proxy, false),
+            NativeMenuAction::Refresh => self.refresh_async(proxy, RefreshMode::Rebuild),
             NativeMenuAction::OpenSettings => {
                 if let Err(error) = self.open_settings(target, proxy) {
                     eprintln!("failed to open settings: {error}");
@@ -176,7 +186,7 @@ impl AppState {
             }
             IpcCommand::SaveLabels { items } => match self.save_labels(items) {
                 Ok(()) => {
-                    self.refresh_async(proxy, false);
+                    self.refresh_async(proxy, RefreshMode::Rebuild);
                     self.evaluate_settings(
                         "window.monitorSwitchSaved && window.monitorSwitchSaved();",
                     );
@@ -329,8 +339,9 @@ impl AppState {
         };
 
         if let Some(tray_icon) = &self.tray_icon {
-            let (menu, actions) = build_native_menu(state);
+            let (menu, actions, input_items) = build_native_menu(state);
             self.native_menu_actions = actions;
+            self.native_input_items = input_items;
             tray_icon.set_menu(Some(Box::new(menu)));
         }
 
@@ -339,8 +350,8 @@ impl AppState {
         }
     }
 
-    fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>, show_menu: bool) {
-        if show_menu {
+    fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>, mode: RefreshMode) {
+        if mode == RefreshMode::OpenMenu {
             if self.menu_refresh_in_flight {
                 return;
             }
@@ -350,18 +361,44 @@ impl AppState {
         thread::spawn(move || {
             let _ = proxy.send_event(UserEvent::RefreshFinished {
                 state: build_state(&config_path),
-                show_menu,
+                mode,
             });
         });
     }
 
-    fn handle_refresh_finished(&mut self, state: UiState, show_menu: bool) {
+    fn handle_refresh_finished(&mut self, state: UiState, mode: RefreshMode) {
         self.ui_state = Some(state);
-        self.render_views();
-        if show_menu {
-            self.menu_refresh_in_flight = false;
-            if let Some(tray_icon) = &self.tray_icon {
-                tray_icon.show_menu();
+        match mode {
+            RefreshMode::Rebuild => self.render_views(),
+            RefreshMode::SyncOpenMenu => {
+                self.sync_native_input_items();
+                if let (Some(settings), Some(state)) = (&self.settings, &self.ui_state) {
+                    refresh_webview(&settings.webview, state);
+                }
+            }
+            RefreshMode::OpenMenu => {
+                self.render_views();
+                self.menu_refresh_in_flight = false;
+                if let Some(tray_icon) = &self.tray_icon {
+                    tray_icon.show_menu();
+                }
+            }
+        }
+    }
+
+    fn sync_native_input_items(&self) {
+        for item in self.native_input_items.values() {
+            item.set_checked(false);
+        }
+        let Some(state) = &self.ui_state else {
+            return;
+        };
+        for (monitor_index, monitor) in state.monitors.iter().enumerate() {
+            for input in &monitor.inputs {
+                let id = format!("input:{monitor_index}:{:02x}", input.value);
+                if let Some(item) = self.native_input_items.get(&id) {
+                    item.set_checked(input.current);
+                }
             }
         }
     }
@@ -457,7 +494,12 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::TrayActivated) => {
-                state.refresh_async(proxy.clone(), true);
+                let mode = if cfg!(target_os = "macos") {
+                    RefreshMode::SyncOpenMenu
+                } else {
+                    RefreshMode::OpenMenu
+                };
+                state.refresh_async(proxy.clone(), mode);
             }
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
@@ -474,9 +516,9 @@ fn main() {
             }
             Event::UserEvent(UserEvent::RefreshFinished {
                 state: ui_state,
-                show_menu,
+                mode,
             }) => {
-                state.handle_refresh_finished(ui_state, show_menu);
+                state.handle_refresh_finished(ui_state, mode);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -488,6 +530,19 @@ fn main() {
     });
 }
 
+#[cfg(target_os = "macos")]
+fn is_tray_activation(event: &TrayIconEvent) -> bool {
+    matches!(
+        event,
+        TrayIconEvent::Click {
+            button: MouseButton::Left | MouseButton::Right,
+            button_state: MouseButtonState::Down,
+            ..
+        }
+    )
+}
+
+#[cfg(target_os = "windows")]
 fn is_tray_activation(event: &TrayIconEvent) -> bool {
     matches!(
         event,
@@ -560,9 +615,16 @@ fn configure_macos_tray_symbol(tray_icon: &TrayIcon) {
 #[cfg(not(target_os = "macos"))]
 fn configure_macos_tray_symbol(_tray_icon: &TrayIcon) {}
 
-fn build_native_menu(state: &UiState) -> (Menu, HashMap<String, NativeMenuAction>) {
+fn build_native_menu(
+    state: &UiState,
+) -> (
+    Menu,
+    HashMap<String, NativeMenuAction>,
+    HashMap<String, CheckMenuItem>,
+) {
     let menu = Menu::new();
     let mut actions = HashMap::new();
+    let mut input_items = HashMap::new();
     let connected = if state.monitor.connected {
         "DDC/CI 已连接"
     } else {
@@ -608,6 +670,7 @@ fn build_native_menu(state: &UiState) -> (Menu, HashMap<String, NativeMenuAction
                 None,
             );
             let _ = menu.append(&item);
+            input_items.insert(id.clone(), item.clone());
             let index = menu.items().len() - 1;
             let subtitle = if input.subtitle == "Not configured" {
                 input.hex.as_str()
@@ -646,7 +709,7 @@ fn build_native_menu(state: &UiState) -> (Menu, HashMap<String, NativeMenuAction
     let _ = menu.append(&quit);
     actions.insert("quit".to_string(), NativeMenuAction::Quit);
 
-    (menu, actions)
+    (menu, actions, input_items)
 }
 
 #[cfg(target_os = "windows")]

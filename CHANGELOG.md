@@ -26,6 +26,8 @@ All notable changes to Monitor Switch are documented here. The project follows
 - The Windows user package now contains one executable named `Monitor Switch.exe`.
 - Opening the tray menu now refreshes VCP `0x60` first, so the current-input
   checkmark stays accurate after switching away and returning from another device.
+- macOS opens its AppKit menu immediately and applies the refreshed checkmark to
+  the live menu instead of waiting for DDC/CI before showing it.
 - The tray menu contains configured, monitor-reported, or explicitly enabled
   inputs; the current input remains visible even when disabled.
 - The settings window now uses a compact monitor switcher, source table, native
