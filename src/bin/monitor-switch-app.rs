@@ -30,8 +30,8 @@ use wry::{WebView, WebViewBuilder};
 #[derive(Debug, Clone)]
 enum UserEvent {
     TrayActivated,
-    #[cfg(target_os = "windows")]
     PrewarmSettings,
+    RebuildMenu,
     NativeMenu(MenuEvent),
     Ipc(String),
     SwitchFinished {
@@ -85,6 +85,7 @@ struct AppState {
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
     native_input_items: HashMap<String, CheckMenuItem>,
+    native_menu_signature: Vec<String>,
 }
 
 impl AppState {
@@ -96,6 +97,7 @@ impl AppState {
             ui_state: None,
             native_menu_actions: HashMap::new(),
             native_input_items: HashMap::new(),
+            native_menu_signature: Vec::new(),
         }
     }
 
@@ -121,6 +123,7 @@ impl AppState {
         let (menu, actions, input_items) = build_native_menu(&state);
         self.native_menu_actions = actions;
         self.native_input_items = input_items;
+        self.native_menu_signature = menu_signature(&state);
         tray_builder = tray_builder
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
@@ -132,9 +135,13 @@ impl AppState {
 
         self.ui_state = Some(state);
         self.refresh_async(proxy.clone());
-        #[cfg(target_os = "windows")]
         thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(2_500));
+            let delay = if cfg!(target_os = "windows") {
+                2_500
+            } else {
+                1_000
+            };
+            thread::sleep(std::time::Duration::from_millis(delay));
             let _ = proxy.send_event(UserEvent::PrewarmSettings);
         });
         Ok(())
@@ -226,7 +233,8 @@ impl AppState {
             state.operation.target_display = display.clone();
             state.operation.message = None;
         }
-        self.render_views();
+        self.sync_native_input_items();
+        self.refresh_settings();
 
         let config_path = self.config_path.clone();
         thread::spawn(move || {
@@ -242,7 +250,6 @@ impl AppState {
         });
     }
 
-    #[cfg(target_os = "windows")]
     fn prewarm_settings(
         &mut self,
         target: &EventLoopWindowTarget<UserEvent>,
@@ -325,21 +332,46 @@ impl AppState {
         Ok(())
     }
 
-    fn render_views(&mut self) {
+    fn rebuild_native_menu(&mut self) {
         let Some(state) = &self.ui_state else {
             return;
         };
 
-        if let Some(tray_icon) = &self.tray_icon {
+        let signature = menu_signature(state);
+        if signature != self.native_menu_signature {
+            let Some(tray_icon) = &self.tray_icon else {
+                return;
+            };
             let (menu, actions, input_items) = build_native_menu(state);
             self.native_menu_actions = actions;
             self.native_input_items = input_items;
+            self.native_menu_signature = signature;
             tray_icon.set_menu(Some(Box::new(menu)));
         }
+        self.sync_native_input_items();
+    }
 
+    fn refresh_settings(&self) {
+        let Some(state) = &self.ui_state else {
+            return;
+        };
         if let Some(settings) = &self.settings {
             refresh_webview(&settings.webview, state);
         }
+    }
+
+    fn schedule_menu_rebuild(&self, proxy: EventLoopProxy<UserEvent>) {
+        if self
+            .ui_state
+            .as_ref()
+            .is_none_or(|state| menu_signature(state) == self.native_menu_signature)
+        {
+            return;
+        }
+        thread::spawn(move || {
+            thread::sleep(std::time::Duration::from_millis(450));
+            let _ = proxy.send_event(UserEvent::RebuildMenu);
+        });
     }
 
     fn refresh_async(&self, proxy: EventLoopProxy<UserEvent>) {
@@ -381,9 +413,11 @@ impl AppState {
         });
     }
 
-    fn handle_refresh_finished(&mut self, state: UiState) {
+    fn handle_refresh_finished(&mut self, state: UiState, proxy: EventLoopProxy<UserEvent>) {
         self.ui_state = Some(state);
-        self.render_views();
+        self.sync_native_input_items();
+        self.refresh_settings();
+        self.schedule_menu_rebuild(proxy);
     }
 
     fn handle_current_inputs_refreshed(&mut self, values: Vec<(String, Option<u16>)>) {
@@ -412,14 +446,13 @@ impl AppState {
         }
         sync_primary_monitor(state);
         self.sync_native_input_items();
-        if let (Some(settings), Some(state)) = (&self.settings, &self.ui_state) {
-            refresh_webview(&settings.webview, state);
-        }
+        self.refresh_settings();
     }
 
     fn sync_native_input_items(&self) {
         for item in self.native_input_items.values() {
             item.set_checked(false);
+            item.set_enabled(true);
         }
         let Some(state) = &self.ui_state else {
             return;
@@ -428,7 +461,11 @@ impl AppState {
             for input in &monitor.inputs {
                 let id = format!("input:{monitor_index}:{:02x}", input.value);
                 if let Some(item) = self.native_input_items.get(&id) {
-                    item.set_checked(input.current);
+                    let switching = state.operation.status == OperationStatus::Switching
+                        && state.operation.target_value == Some(input.value)
+                        && state.operation.target_display.as_deref() == Some(&monitor.selector);
+                    item.set_checked(input.current || switching);
+                    item.set_enabled(state.operation.status != OperationStatus::Switching);
                 }
             }
         }
@@ -445,6 +482,7 @@ impl AppState {
         value: u16,
         display: String,
         result: std::result::Result<(), String>,
+        proxy: EventLoopProxy<UserEvent>,
     ) {
         match result {
             Ok(()) => {
@@ -480,7 +518,9 @@ impl AppState {
                 }
             }
         }
-        self.render_views();
+        self.sync_native_input_items();
+        self.refresh_settings();
+        self.schedule_menu_rebuild(proxy);
     }
 
     fn handle_close(&self, window_id: WindowId, control_flow: &mut ControlFlow) {
@@ -501,6 +541,38 @@ fn sync_primary_monitor(state: &mut UiState) {
         state.inputs = first.inputs;
         state.available_inputs = first.available_inputs;
     }
+}
+
+fn menu_signature(state: &UiState) -> Vec<String> {
+    let operation = if state.operation.status == OperationStatus::Error {
+        format!(
+            "error:{}",
+            state.operation.message.as_deref().unwrap_or("切换失败")
+        )
+    } else {
+        "ready".to_string()
+    };
+    std::iter::once(operation)
+        .chain(
+            state
+                .monitors
+                .iter()
+                .enumerate()
+                .flat_map(|(monitor_index, monitor)| {
+                    let mut entries = vec![format!(
+                        "monitor:{monitor_index}:{}:{}",
+                        monitor.selector, monitor.name
+                    )];
+                    entries.extend(monitor.inputs.iter().map(|input| {
+                        format!(
+                            "input:{monitor_index}:{:02x}:{}:{}",
+                            input.value, input.name, input.subtitle
+                        )
+                    }));
+                    entries
+                }),
+        )
+        .collect()
 }
 
 fn custom_label(value: u16, label: &str) -> Option<String> {
@@ -558,9 +630,11 @@ fn main() {
             Event::UserEvent(UserEvent::TrayActivated) => {
                 state.refresh_current_inputs_async(proxy.clone());
             }
-            #[cfg(target_os = "windows")]
             Event::UserEvent(UserEvent::PrewarmSettings) => {
                 state.prewarm_settings(target, proxy.clone());
+            }
+            Event::UserEvent(UserEvent::RebuildMenu) => {
+                state.rebuild_native_menu();
             }
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
@@ -573,10 +647,10 @@ fn main() {
                 display,
                 result,
             }) => {
-                state.handle_switch_finished(value, display, result);
+                state.handle_switch_finished(value, display, result, proxy.clone());
             }
             Event::UserEvent(UserEvent::RefreshFinished(ui_state)) => {
-                state.handle_refresh_finished(*ui_state);
+                state.handle_refresh_finished(*ui_state, proxy.clone());
             }
             Event::UserEvent(UserEvent::CurrentInputsRefreshed(values)) => {
                 state.handle_current_inputs_refreshed(values);

@@ -39,6 +39,13 @@ All notable changes to Monitor Switch are documented here. The project follows
   style toggles, and a denser macOS layout.
 - Existing profiles remain visible after upgrade, while generic fallback
   candidates start hidden.
+- macOS keeps the status-item menu instance stable while switching and defers
+  structural menu changes until native menu tracking has finished.
+- Settings refreshes now patch live state in place instead of rebuilding the
+  entire WebView document, preserving focus and reducing layout work.
+- Settings typography, contrast, and platform colors now follow the macOS and
+  Windows system font rendering more closely, with motion limited to lightweight
+  control-state transitions.
 
 ## [0.2.0] - 2026-08-01
 
