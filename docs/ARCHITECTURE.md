@@ -6,7 +6,8 @@ Monitor Switch has three layers:
    discovery, input values, and backend dispatch.
 2. `monitor-switch` is a diagnostic and scripting CLI.
 3. `monitor-switch-app` is the desktop shell: a native `NSMenu` on macOS and a
-   compact Fluent flyout on Windows, plus a small settings window.
+   native Win32 context menu on Windows, plus a small settings window backed by
+   WebKit on macOS and the system WebView2 runtime on Windows.
 
 ## Backend policy
 
@@ -14,6 +15,10 @@ Monitor Switch has three layers:
 on macOS and `ddc-winapi` on Windows through `ddc-hi`. External command backends
 remain available only for monitors or connection paths that need a compatibility
 workaround.
+
+The Windows backend talks to the monitor through the operating system's DXVA2
+monitor configuration API. Neither platform needs BetterDisplay or a bundled
+third-party command-line utility for normal operation.
 
 Every switch request contains a display selector and VCP `0x60` value. Display
 selectors use the native backend's stable identifier. Legacy one-based numeric

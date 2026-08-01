@@ -3,6 +3,20 @@
 All notable changes to Monitor Switch are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Native Windows system-tray context menu with current-input checkmarks.
+- Windows build and per-user installation scripts, including optional login
+  startup and a console-free desktop executable.
+
+### Changed
+
+- Removed the custom Windows flyout in favor of operating-system menu behavior,
+  positioning, dismissal, focus, shadow, and accessibility.
+- Windows release artifacts now use the same packaging script locally and in CI.
+
 ## [0.2.1] - 2026-08-01
 
 ### Added

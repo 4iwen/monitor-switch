@@ -1,4 +1,5 @@
-#[cfg(target_os = "macos")]
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::collections::HashMap;
 use std::{
     error::Error,
@@ -6,8 +7,6 @@ use std::{
     thread,
 };
 
-#[cfg(not(target_os = "macos"))]
-use monitor_switch::app_html::popover_html;
 use monitor_switch::{
     app_html::settings_html,
     backends::{set_input_source, SwitchRequest},
@@ -16,31 +15,21 @@ use monitor_switch::{
     ui::{build_state, OperationStatus, UiState},
 };
 use serde::Deserialize;
-#[cfg(not(target_os = "macos"))]
-use tao::dpi::PhysicalPosition;
 use tao::{
     dpi::LogicalSize,
     event::{Event, StartCause, WindowEvent},
     event_loop::{ControlFlow, EventLoopBuilder, EventLoopProxy, EventLoopWindowTarget},
     window::{Window, WindowBuilder, WindowId},
 };
-#[cfg(target_os = "macos")]
 use tray_icon::menu::{
     CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem,
 };
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
-#[cfg(not(target_os = "macos"))]
-use tray_icon::{MouseButtonState, Rect, TrayIconEvent};
 use wry::{WebView, WebViewBuilder};
 
 #[derive(Debug, Clone)]
 enum UserEvent {
-    #[cfg(not(target_os = "macos"))]
-    Tray(Rect),
-    #[cfg(target_os = "macos")]
     NativeMenu(MenuEvent),
-    #[cfg(not(target_os = "macos"))]
-    HidePopoverIfUnfocused(u64),
     Ipc(String),
     SwitchFinished {
         value: u16,
@@ -50,7 +39,6 @@ enum UserEvent {
     RefreshFinished(UiState),
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Debug, Clone)]
 enum NativeMenuAction {
     Switch {
@@ -75,20 +63,10 @@ struct LabelUpdate {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum IpcCommand {
-    #[serde(rename = "switchInput")]
-    SwitchInput {
-        value: Option<u16>,
-        display: Option<String>,
-        profile: Option<String>,
-    },
-    #[serde(rename = "openSettings")]
-    OpenSettings,
     #[serde(rename = "closeSettings")]
     CloseSettings,
     #[serde(rename = "saveLabels")]
     SaveLabels { items: Vec<LabelUpdate> },
-    #[serde(rename = "quit")]
-    Quit,
 }
 
 struct WindowBundle {
@@ -99,12 +77,8 @@ struct WindowBundle {
 struct AppState {
     config_path: PathBuf,
     tray_icon: Option<TrayIcon>,
-    popover: Option<WindowBundle>,
     settings: Option<WindowBundle>,
     ui_state: Option<UiState>,
-    #[cfg(not(target_os = "macos"))]
-    popover_epoch: u64,
-    #[cfg(target_os = "macos")]
     native_menu_actions: HashMap<String, NativeMenuAction>,
 }
 
@@ -113,12 +87,8 @@ impl AppState {
         Self {
             config_path,
             tray_icon: None,
-            popover: None,
             settings: None,
             ui_state: None,
-            #[cfg(not(target_os = "macos"))]
-            popover_epoch: 0,
-            #[cfg(target_os = "macos")]
             native_menu_actions: HashMap::new(),
         }
     }
@@ -128,7 +98,6 @@ impl AppState {
         target: &EventLoopWindowTarget<UserEvent>,
         proxy: EventLoopProxy<UserEvent>,
     ) -> std::result::Result<(), Box<dyn Error>> {
-        #[cfg(target_os = "macos")]
         let _ = (target, &proxy);
         configure_macos_application();
         if let Err(error) = migrate_legacy_config(&self.config_path) {
@@ -140,29 +109,21 @@ impl AppState {
             .with_icon(build_icon()?)
             .with_icon_as_template(true);
 
-        #[cfg(target_os = "macos")]
-        {
-            let (menu, actions) = build_native_menu(&state);
-            self.native_menu_actions = actions;
-            tray_builder = tray_builder
-                .with_menu(Box::new(menu))
-                .with_menu_on_left_click(true)
-                .with_menu_on_right_click(true);
-        }
+        let (menu, actions) = build_native_menu(&state);
+        self.native_menu_actions = actions;
+        tray_builder = tray_builder
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(true)
+            .with_menu_on_right_click(true);
 
         let tray_icon = tray_builder.build()?;
         configure_macos_tray_symbol(&tray_icon);
         self.tray_icon = Some(tray_icon);
 
-        #[cfg(not(target_os = "macos"))]
-        {
-            self.popover = Some(create_popover(target, proxy, &state)?);
-        }
         self.ui_state = Some(state);
         Ok(())
     }
 
-    #[cfg(target_os = "macos")]
     fn handle_native_menu(
         &mut self,
         id: &MenuId,
@@ -192,31 +153,7 @@ impl AppState {
         }
     }
 
-    #[cfg(not(target_os = "macos"))]
-    fn handle_tray_event(&mut self, rect: Rect, proxy: EventLoopProxy<UserEvent>) {
-        self.popover_epoch = self.popover_epoch.wrapping_add(1);
-        let Some(popover) = &self.popover else {
-            return;
-        };
-
-        let visible = popover.window.is_visible();
-        if visible {
-            popover.window.set_visible(false);
-        } else {
-            place_popover_at_rect(&popover.window, rect);
-            popover.window.set_visible(true);
-            popover.window.set_focus();
-            self.refresh_async(proxy);
-        }
-    }
-
-    fn handle_ipc(
-        &mut self,
-        body: &str,
-        target: &EventLoopWindowTarget<UserEvent>,
-        proxy: EventLoopProxy<UserEvent>,
-        control_flow: &mut ControlFlow,
-    ) {
+    fn handle_ipc(&mut self, body: &str, proxy: EventLoopProxy<UserEvent>) {
         let command = match serde_json::from_str::<IpcCommand>(body) {
             Ok(command) => command,
             Err(error) => {
@@ -226,21 +163,6 @@ impl AppState {
         };
 
         match command {
-            IpcCommand::SwitchInput {
-                value,
-                display,
-                profile,
-            } => {
-                self.begin_switch(value, display, profile, proxy);
-            }
-            IpcCommand::OpenSettings => {
-                if let Some(popover) = &self.popover {
-                    popover.window.set_visible(false);
-                }
-                if let Err(error) = self.open_settings(target, proxy) {
-                    eprintln!("failed to open settings: {error}");
-                }
-            }
             IpcCommand::CloseSettings => {
                 if let Some(settings) = &self.settings {
                     settings.window.set_visible(false);
@@ -261,7 +183,6 @@ impl AppState {
                         ));
                 }
             },
-            IpcCommand::Quit => *control_flow = ControlFlow::Exit,
         }
     }
 
@@ -401,27 +322,12 @@ impl AppState {
             return;
         };
 
-        #[cfg(target_os = "macos")]
         if let Some(tray_icon) = &self.tray_icon {
             let (menu, actions) = build_native_menu(state);
             self.native_menu_actions = actions;
             tray_icon.set_menu(Some(Box::new(menu)));
         }
 
-        #[cfg(not(target_os = "macos"))]
-        if let Some(popover) = &self.popover {
-            let (width, height) = popover_dimensions(state);
-            let current = popover
-                .window
-                .inner_size()
-                .to_logical::<f64>(popover.window.scale_factor());
-            if (current.width - width).abs() > 0.5 || (current.height - height).abs() > 0.5 {
-                popover
-                    .window
-                    .set_inner_size(LogicalSize::new(width, height));
-            }
-            refresh_webview(&popover.webview, state);
-        }
         if let Some(settings) = &self.settings {
             refresh_webview(&settings.webview, state);
         }
@@ -468,42 +374,7 @@ impl AppState {
             }
         }
 
-        if let Some(popover) = &self.popover {
-            if popover.window.id() == window_id {
-                popover.window.set_visible(false);
-                return;
-            }
-        }
-
         *control_flow = ControlFlow::Exit;
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn handle_focus(&self, window_id: WindowId, focused: bool, proxy: EventLoopProxy<UserEvent>) {
-        if focused {
-            return;
-        }
-        if let Some(popover) = &self.popover {
-            if popover.window.id() == window_id {
-                let epoch = self.popover_epoch;
-                thread::spawn(move || {
-                    thread::sleep(std::time::Duration::from_millis(140));
-                    let _ = proxy.send_event(UserEvent::HidePopoverIfUnfocused(epoch));
-                });
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn hide_popover_if_unfocused(&self, epoch: u64) {
-        if epoch != self.popover_epoch {
-            return;
-        }
-        if let Some(popover) = &self.popover {
-            if !popover.window.is_focused() {
-                popover.window.set_visible(false);
-            }
-        }
     }
 }
 
@@ -536,18 +407,7 @@ fn main() {
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
 
-    #[cfg(not(target_os = "macos"))]
-    let tray_proxy = proxy.clone();
-    #[cfg(not(target_os = "macos"))]
-    TrayIconEvent::set_event_handler(Some(move |event| {
-        if is_tray_activation(&event) {
-            let _ = tray_proxy.send_event(UserEvent::Tray(tray_event_rect(&event)));
-        }
-    }));
-
-    #[cfg(target_os = "macos")]
     let menu_proxy = proxy.clone();
-    #[cfg(target_os = "macos")]
     MenuEvent::set_event_handler(Some(move |event| {
         let _ = menu_proxy.send_event(UserEvent::NativeMenu(event));
     }));
@@ -564,18 +424,11 @@ fn main() {
                     *control_flow = ControlFlow::Exit;
                 }
             }
-            #[cfg(not(target_os = "macos"))]
-            Event::UserEvent(UserEvent::Tray(rect)) => state.handle_tray_event(rect, proxy.clone()),
-            #[cfg(target_os = "macos")]
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
             }
-            #[cfg(not(target_os = "macos"))]
-            Event::UserEvent(UserEvent::HidePopoverIfUnfocused(epoch)) => {
-                state.hide_popover_if_unfocused(epoch);
-            }
             Event::UserEvent(UserEvent::Ipc(body)) => {
-                state.handle_ipc(&body, target, proxy.clone(), control_flow);
+                state.handle_ipc(&body, proxy.clone());
             }
             Event::UserEvent(UserEvent::SwitchFinished {
                 value,
@@ -593,35 +446,9 @@ fn main() {
                 window_id,
                 ..
             } => state.handle_close(window_id, control_flow),
-            #[cfg(not(target_os = "macos"))]
-            Event::WindowEvent {
-                event: WindowEvent::Focused(focused),
-                window_id,
-                ..
-            } => state.handle_focus(window_id, focused, proxy.clone()),
             _ => {}
         }
     });
-}
-
-#[cfg(not(target_os = "macos"))]
-fn create_popover(
-    target: &EventLoopWindowTarget<UserEvent>,
-    proxy: EventLoopProxy<UserEvent>,
-    state: &UiState,
-) -> std::result::Result<WindowBundle, Box<dyn Error>> {
-    let (width, height) = popover_dimensions(state);
-    let window = WindowBuilder::new()
-        .with_title("Monitor Switch")
-        .with_inner_size(LogicalSize::new(width, height))
-        .with_resizable(false)
-        .with_decorations(false)
-        .with_transparent(true)
-        .with_always_on_top(true)
-        .with_visible(false)
-        .build(target)?;
-    let webview = build_webview(&window, proxy, popover_html(state), true)?;
-    Ok(WindowBundle { window, webview })
 }
 
 #[cfg(target_os = "macos")]
@@ -685,7 +512,6 @@ fn configure_macos_tray_symbol(tray_icon: &TrayIcon) {
 #[cfg(not(target_os = "macos"))]
 fn configure_macos_tray_symbol(_tray_icon: &TrayIcon) {}
 
-#[cfg(target_os = "macos")]
 fn build_native_menu(state: &UiState) -> (Menu, HashMap<String, NativeMenuAction>) {
     let menu = Menu::new();
     let mut actions = HashMap::new();
@@ -775,6 +601,15 @@ fn build_native_menu(state: &UiState) -> (Menu, HashMap<String, NativeMenuAction
     (menu, actions)
 }
 
+#[cfg(target_os = "windows")]
+fn decorate_native_menu_item(
+    _menu: &Menu,
+    _index: usize,
+    _subtitle: Option<&str>,
+    _system_symbol: Option<&str>,
+) {
+}
+
 #[cfg(target_os = "macos")]
 fn decorate_native_menu_item(
     menu: &Menu,
@@ -818,26 +653,6 @@ fn decorate_native_menu_item(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-fn is_tray_activation(event: &TrayIconEvent) -> bool {
-    matches!(
-        event,
-        TrayIconEvent::Click { button_state, .. } if *button_state == MouseButtonState::Down
-    )
-}
-
-#[cfg(not(target_os = "macos"))]
-fn tray_event_rect(event: &TrayIconEvent) -> Rect {
-    match event {
-        TrayIconEvent::Click { rect, .. }
-        | TrayIconEvent::DoubleClick { rect, .. }
-        | TrayIconEvent::Enter { rect, .. }
-        | TrayIconEvent::Move { rect, .. }
-        | TrayIconEvent::Leave { rect, .. } => *rect,
-        _ => Rect::default(),
-    }
-}
-
 fn create_settings(
     target: &EventLoopWindowTarget<UserEvent>,
     proxy: EventLoopProxy<UserEvent>,
@@ -851,7 +666,7 @@ fn create_settings(
         .with_resizable(false)
         .with_visible(false)
         .build(target)?;
-    let webview = build_webview(&window, proxy, settings_html(state), false)?;
+    let webview = build_webview(&window, proxy, settings_html(state))?;
     Ok(WindowBundle { window, webview })
 }
 
@@ -859,54 +674,19 @@ fn build_webview(
     window: &Window,
     proxy: EventLoopProxy<UserEvent>,
     html: String,
-    transparent: bool,
 ) -> wry::Result<WebView> {
-    let builder = WebViewBuilder::new()
+    let background = if cfg!(target_os = "macos") {
+        (236, 236, 236, 255)
+    } else {
+        (243, 243, 243, 255)
+    };
+    WebViewBuilder::new()
         .with_html(html)
         .with_ipc_handler(move |request| {
             let _ = proxy.send_event(UserEvent::Ipc(request.body().clone()));
-        });
-    let builder = if transparent {
-        builder
-            .with_transparent(true)
-            .with_background_color((0, 0, 0, 0))
-    } else {
-        let background = if cfg!(target_os = "macos") {
-            (236, 236, 236, 255)
-        } else {
-            (243, 243, 243, 255)
-        };
-        builder.with_background_color(background)
-    };
-    builder.build(window)
-}
-
-#[cfg(not(target_os = "macos"))]
-fn popover_dimensions(state: &UiState) -> (f64, f64) {
-    let row_height = if cfg!(target_os = "windows") {
-        56.0
-    } else {
-        44.0
-    };
-    let width = if cfg!(target_os = "windows") {
-        380.0
-    } else {
-        292.0
-    };
-    let error_height = (state.operation.status == OperationStatus::Error) as u8 as f64 * 54.0;
-    let base_height = if cfg!(target_os = "windows") {
-        178.0
-    } else {
-        164.0
-    };
-    let max_height = if cfg!(target_os = "windows") {
-        580.0
-    } else {
-        520.0
-    };
-    let height = (base_height + row_height * state.inputs.len() as f64 + error_height)
-        .clamp(258.0, max_height);
-    (width, height)
+        })
+        .with_background_color(background)
+        .build(window)
 }
 
 fn settings_dimensions() -> (f64, f64) {
@@ -954,78 +734,40 @@ fn switch_input(
     Ok(())
 }
 
-#[cfg(not(target_os = "macos"))]
-fn place_popover_at_rect(window: &Window, rect: Rect) {
-    const GAP: i32 = 8;
-    const SCREEN_MARGIN: i32 = 8;
-
-    let window_size = window.outer_size();
-    let width = window_size.width as i32;
-    let height = window_size.height as i32;
-    let icon_center_x = rect.position.x.round() as i32 + rect.size.width as i32 / 2;
-    let icon_center_y = rect.position.y.round() as i32 + rect.size.height as i32 / 2;
-    let mut x = icon_center_x - width / 2;
-    let mut y = rect.position.y.round() as i32 + rect.size.height as i32 + GAP;
-
-    let monitor = window
-        .available_monitors()
-        .find(|monitor| {
-            let position = monitor.position();
-            let size = monitor.size();
-            icon_center_x >= position.x
-                && icon_center_x <= position.x + size.width as i32
-                && icon_center_y >= position.y
-                && icon_center_y <= position.y + size.height as i32
-        })
-        .or_else(|| window.primary_monitor());
-
-    if let Some(monitor) = monitor {
-        let monitor_position = monitor.position();
-        let monitor_size = monitor.size();
-        let min_x = monitor_position.x + SCREEN_MARGIN;
-        let max_x = monitor_position.x + monitor_size.width as i32 - width - SCREEN_MARGIN;
-        let min_y = monitor_position.y + SCREEN_MARGIN;
-        let max_y = monitor_position.y + monitor_size.height as i32 - height - SCREEN_MARGIN;
-
-        if cfg!(target_os = "windows")
-            && icon_center_y > monitor_position.y + monitor_size.height as i32 / 2
-        {
-            y = rect.position.y.round() as i32 - height - GAP;
-        }
-
-        x = x.clamp(min_x, max_x.max(min_x));
-        y = y.clamp(min_y, max_y.max(min_y));
-    }
-
-    window.set_outer_position(PhysicalPosition::new(x, y));
-}
-
 fn build_icon() -> std::result::Result<Icon, tray_icon::BadIcon> {
     const WIDTH: u32 = 18;
     const HEIGHT: u32 = 18;
     let mut rgba = vec![0; (WIDTH * HEIGHT * 4) as usize];
+    let color = if cfg!(target_os = "windows") {
+        (36, 122, 218)
+    } else {
+        (0, 0, 0)
+    };
 
     for y in 3..12 {
         for x in 2..16 {
             let border = x == 2 || x == 15 || y == 3 || y == 11;
             if border {
-                set_pixel(&mut rgba, WIDTH, x, y, 255);
+                set_pixel(&mut rgba, WIDTH, x, y, color, 255);
             }
         }
     }
     for y in 13..15 {
         for x in 7..11 {
-            set_pixel(&mut rgba, WIDTH, x, y, 255);
+            set_pixel(&mut rgba, WIDTH, x, y, color, 255);
         }
     }
     for x in 5..13 {
-        set_pixel(&mut rgba, WIDTH, x, 15, 255);
+        set_pixel(&mut rgba, WIDTH, x, 15, color, 255);
     }
 
     Icon::from_rgba(rgba, WIDTH, HEIGHT)
 }
 
-fn set_pixel(rgba: &mut [u8], width: u32, x: u32, y: u32, alpha: u8) {
+fn set_pixel(rgba: &mut [u8], width: u32, x: u32, y: u32, color: (u8, u8, u8), alpha: u8) {
     let index = ((y * width + x) * 4) as usize;
+    rgba[index] = color.0;
+    rgba[index + 1] = color.1;
+    rgba[index + 2] = color.2;
     rgba[index + 3] = alpha;
 }

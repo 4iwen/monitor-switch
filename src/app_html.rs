@@ -1,94 +1,5 @@
 use crate::ui::UiState;
 
-pub fn popover_html(state: &UiState) -> String {
-    let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
-    format!(
-        r#"<!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <style>{base}{popover}</style>
-</head>
-<body class="{platform} popover-body">
-  <main id="app"></main>
-  <script>
-    const ICONS = {icons};
-    const PLATFORM = "{platform}";
-    const send = (type, payload = {{}}) => window.ipc.postMessage(JSON.stringify({{ type, ...payload }}));
-    const icon = name => ICONS[name] || ICONS.monitor;
-    const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, char => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}}[char]));
-
-    function render(state) {{
-      window.__STATE__ = state;
-      const operation = state.operation || {{ status: 'idle' }};
-      const inputs = state.inputs.map(input => {{
-        const switchingActive = operation.status === 'switching';
-        const switching = operation.status === 'switching' && operation.target_value === input.value;
-        const selected = switching || (!switchingActive && input.current);
-        return `
-          <button class="source-row ${{selected ? 'selected' : ''}} ${{switching ? 'switching' : ''}}"
-                  data-switch-value="${{input.value}}"
-                  data-display="${{escapeHtml(input.display_selector)}}"
-                  data-profile="${{escapeHtml(input.profile_name || '')}}"
-                  ${{operation.status === 'switching' ? 'disabled' : ''}}>
-            <span class="source-icon">${{icon(input.icon)}}</span>
-            <span class="source-copy">
-              <strong>${{escapeHtml(input.name)}}</strong>
-              <small>${{escapeHtml(input.subtitle === 'Not configured' ? input.hex : input.subtitle)}}</small>
-            </span>
-            ${{selected ? `<span class="check" aria-label="${{switching ? '正在切换' : '当前输入源'}}">✓</span>` : ''}}
-          </button>`;
-      }}).join('');
-
-      const error = operation.status === 'error'
-        ? `<div class="error-banner" role="alert">${{icon('warning')}}<span>${{escapeHtml(operation.message || '切换失败，请重试')}}</span></div>`
-        : '';
-
-      document.getElementById('app').innerHTML = `
-        <section class="popover-surface">
-          <header class="popover-header">
-            <div>
-              <h1>Monitor Switch</h1>
-              <p><i class="connection ${{state.monitor.connected ? 'online' : ''}}"></i>${{escapeHtml(state.monitor.name)}} · ${{state.monitor.connected ? 'DDC/CI 已连接' : '无法读取当前输入源'}}</p>
-            </div>
-          </header>
-          <div class="separator"></div>
-          <section class="sources" aria-label="输入源">
-            <h2>输入源</h2>
-            ${{inputs || '<div class="empty">尚未检测到输入源</div>'}}
-          </section>
-          ${{error}}
-          <div class="separator footer-separator"></div>
-          <footer class="popover-footer">
-            <button onclick="send('openSettings')">${{icon('settings')}}<span>设置…</span></button>
-            <button onclick="send('quit')">${{icon('quit')}}<span>退出${{PLATFORM === 'macos' ? ' Monitor Switch' : ''}}</span></button>
-          </footer>
-        </section>`;
-      document.querySelectorAll('[data-switch-value]').forEach(element => {{
-        element.addEventListener('click', () => switchInput(element));
-      }});
-    }}
-
-    function switchInput(element) {{
-      if (element.disabled) return;
-      const profile = element.dataset.profile || null;
-      send('switchInput', {{ value: Number(element.dataset.switchValue), display: element.dataset.display || null, profile }});
-    }}
-
-    window.monitorSwitchRender = render;
-    render({state_json});
-  </script>
-</body>
-</html>"#,
-        base = base_css(),
-        popover = popover_css(),
-        icons = icons_js(),
-        platform = platform_name(),
-        state_json = state_json,
-    )
-}
-
 pub fn settings_html(state: &UiState) -> String {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
     format!(
@@ -236,21 +147,6 @@ fn base_css() -> &'static str {
 "#
 }
 
-fn popover_css() -> &'static str {
-    r#"
-.popover-body{overflow:hidden;background:transparent;padding:0;color:var(--text)}
-.popover-surface{position:relative;height:100%;display:flex;flex-direction:column;overflow:hidden;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)}
-.popover-header{display:flex;align-items:center;flex:0 0 auto;padding:14px 15px 10px}.popover-header h1{margin:0 0 3px;font-size:14px;line-height:1.2;font-weight:650}.popover-header p{display:flex;align-items:center;gap:6px;margin:0;color:var(--secondary);font-size:11px}
-.separator{height:1px;flex:0 0 auto;background:var(--separator);margin:0 11px}.sources{min-height:0;flex:1;padding:8px 7px 1px;overflow:auto}.sources h2{margin:0;padding:0 7px 4px;color:var(--secondary);font-size:10px;font-weight:500}
-.source-row{position:relative;width:100%;min-height:44px;display:flex;align-items:center;gap:9px;padding:5px 9px;border-radius:var(--row-radius);background:transparent;text-align:left;cursor:default;transition:background .12s ease}.source-row:not(:disabled):hover{background:var(--hover)}.source-row.selected{background:var(--selected);color:var(--selected-text)}.source-row:disabled{opacity:1}
-.source-icon{display:grid;place-items:center;width:25px;height:25px;flex:0 0 auto}.source-icon svg{width:17px;height:17px}.source-copy{display:grid;gap:1px;min-width:0;flex:1}.source-copy strong{font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.source-copy small{font-size:10px;color:var(--secondary)}.source-row.selected .source-copy small{color:var(--selected-secondary)}.check{color:inherit;font-size:16px}
-.footer-separator{margin-top:6px}.popover-footer{display:flex;flex:0 0 auto;padding:5px 7px 7px;gap:3px}.popover-footer button{min-height:30px;display:flex;align-items:center;gap:7px;padding:0 8px;border-radius:var(--row-radius);background:transparent;font-size:12px}.popover-footer button:hover{background:var(--hover)}.popover-footer button:last-child{margin-left:auto}.popover-footer svg{width:16px;height:16px}.error-banner{max-height:62px;overflow:auto;flex:0 0 auto;color:#b42318;background:rgba(255,59,48,.10)}
-.macos{--surface:transparent;--text:#202022;--secondary:#6f6f74;--separator:rgba(0,0,0,.105);--hover:rgba(0,0,0,.055);--selected:#0a84ff;--selected-text:white;--selected-secondary:rgba(255,255,255,.82);--accent:#0a84ff;--row-radius:6px}.macos .popover-surface{border:0;box-shadow:none;border-radius:18px}.macos .sources{scrollbar-width:none}.macos .sources::-webkit-scrollbar{display:none}.macos .popover-footer{display:block}.macos .popover-footer button{width:100%}.macos .popover-footer button:last-child{margin-left:0}
-.windows{--surface:rgba(248,248,248,.96);--text:#1b1b1b;--secondary:#616161;--border:rgba(0,0,0,.12);--separator:rgba(0,0,0,.09);--hover:rgba(0,0,0,.045);--selected:rgba(0,95,184,.09);--selected-text:#1b1b1b;--selected-secondary:#616161;--accent:#0067c0;--row-radius:4px;--shadow:0 12px 30px rgba(0,0,0,.18),0 2px 8px rgba(0,0,0,.10);font-family:"Segoe UI Variable","Segoe UI",sans-serif}.windows.popover-body{padding:8px}.windows .popover-surface{border-radius:8px;backdrop-filter:blur(24px) saturate(130%)}.windows .popover-header{padding:17px 16px 11px}.windows .popover-header h1{font-size:15px}.windows .popover-header p{font-size:12px}.windows .sources{padding:9px 8px 2px}.windows .sources h2{padding:0 8px 5px;font-size:11px}.windows .source-row{min-height:56px;gap:11px;padding:6px 10px}.windows .source-row.selected:before{content:"";position:absolute;left:2px;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--accent)}.windows .source-icon{width:28px;height:28px}.windows .source-icon svg{width:19px;height:19px}.windows .source-copy{gap:2px}.windows .source-copy strong{font-size:14px}.windows .source-copy small{font-size:11px}.windows .popover-footer{padding:6px 8px 8px}.windows .popover-footer button{min-width:90px;min-height:34px;justify-content:center;font-size:13px}.windows .popover-footer button:last-child{margin-left:auto}
-@media(prefers-color-scheme:dark){.macos{--surface:transparent;--text:#f5f5f7;--secondary:#aaaab0;--separator:rgba(255,255,255,.105);--hover:rgba(255,255,255,.075)}.windows{--surface:rgba(42,42,42,.97);--text:#fff;--secondary:#c8c8c8;--border:rgba(255,255,255,.11);--separator:rgba(255,255,255,.10);--hover:rgba(255,255,255,.07);--selected:rgba(96,205,255,.12);--selected-text:#fff;--selected-secondary:#c8c8c8;--accent:#60cdff}}
-"#
-}
-
 fn settings_css() -> &'static str {
     r#"
 .settings-body{margin:0;overflow:hidden;background:var(--settings-bg);color:var(--text)}
@@ -282,7 +178,7 @@ fn icons_js() -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{popover_html, settings_html};
+    use super::settings_html;
     use crate::ui::{InputView, MonitorView, OperationView, ProfileView, UiState};
 
     fn state() -> UiState {
@@ -341,19 +237,6 @@ mod tests {
             backend: "auto".to_string(),
             operation: OperationView::default(),
         }
-    }
-
-    #[test]
-    fn popover_contains_only_real_actions() {
-        let html = popover_html(&state());
-        assert!(html.contains("Gaming PC"));
-        assert!(html.contains("openSettings"));
-        assert!(html.contains("quit"));
-        assert!(html.contains("data-switch-value"));
-        assert!(!html.contains("onclick=\"switchInput"));
-        assert!(!html.contains("检测当前源"));
-        assert!(!html.contains("⌘"));
-        assert!(!html.contains("top-tabs"));
     }
 
     #[test]

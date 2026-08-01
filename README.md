@@ -11,7 +11,7 @@ account, analytics, or background polling.
 ## Features
 
 - Built-in DDC/CI on macOS and Windows
-- Native macOS menu and platform-specific Windows flyout
+- Native macOS menu and native Windows system-tray menu
 - One-click switching between named inputs
 - Multiple monitors with independent input names
 - Per-input control over which sources appear in the tray menu
@@ -19,6 +19,7 @@ account, analytics, or background polling.
 - CLI for discovery, diagnostics, and scripts
 - Compatibility backends for unusual monitor, dock, and GPU combinations
 - Starts at login on macOS after installation
+- Optional per-user startup shortcut on Windows
 
 ## Requirements
 
@@ -47,6 +48,28 @@ Build without installing:
 ./scripts/build-macos-app.sh
 open "dist/Monitor Switch.app"
 ```
+
+## Windows installation
+
+On Windows 10/11, open PowerShell in the repository and run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
+```
+
+This installs the app in `%LOCALAPPDATA%\Programs\Monitor Switch`, creates a
+per-user Startup shortcut, and opens it directly in the system tray without a
+console window. The settings window uses the Windows WebView2 runtime included
+with current Windows 10 and Windows 11 installations.
+
+Build a portable ZIP without installing:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
+```
+
+The archive is written to `dist\Monitor-Switch-Windows.zip` and includes both
+the tray application and diagnostic CLI.
 
 ## First setup
 

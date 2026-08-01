@@ -27,13 +27,11 @@ jobs:
           ditto -c -k --keepParent "dist/Monitor Switch.app" "${{ matrix.artifact }}"
       - if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --release --bin monitor-switch --bin monitor-switch-app
-          Compress-Archive -Path target/release/monitor-switch.exe,target/release/monitor-switch-app.exe -DestinationPath "${{ matrix.artifact }}"
+        run: ./scripts/build-windows.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ runner.os }}
-          path: ${{ matrix.artifact }}
+          path: ${{ runner.os == 'Windows' && 'dist/Monitor-Switch-Windows.zip' || matrix.artifact }}
 
   publish:
     needs: build
