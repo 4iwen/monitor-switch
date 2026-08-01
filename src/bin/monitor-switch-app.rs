@@ -112,8 +112,11 @@ impl AppState {
         let state = build_cached_state(&self.config_path);
         let mut tray_builder = TrayIconBuilder::new()
             .with_tooltip("Monitor Switch")
-            .with_icon(build_icon()?)
-            .with_icon_as_template(true);
+            .with_icon(build_icon()?);
+        #[cfg(target_os = "macos")]
+        {
+            tray_builder = tray_builder.with_icon_as_template(true);
+        }
 
         let (menu, actions, input_items) = build_native_menu(&state);
         self.native_menu_actions = actions;
@@ -890,6 +893,20 @@ fn switch_input(
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+fn build_icon() -> std::result::Result<Icon, tray_icon::BadIcon> {
+    Icon::from_rgba(
+        include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/packaging/windows/TrayIcon32.rgba"
+        ))
+        .to_vec(),
+        32,
+        32,
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
 fn build_icon() -> std::result::Result<Icon, tray_icon::BadIcon> {
     const WIDTH: u32 = 18;
     const HEIGHT: u32 = 18;
@@ -920,6 +937,7 @@ fn build_icon() -> std::result::Result<Icon, tray_icon::BadIcon> {
     Icon::from_rgba(rgba, WIDTH, HEIGHT)
 }
 
+#[cfg(not(target_os = "windows"))]
 fn set_pixel(rgba: &mut [u8], width: u32, x: u32, y: u32, color: (u8, u8, u8), alpha: u8) {
     let index = ((y * width + x) * 4) as usize;
     rgba[index] = color.0;

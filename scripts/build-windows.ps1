@@ -11,7 +11,15 @@ try {
         Remove-Item $Dist -Recurse -Force
     }
     New-Item -ItemType Directory -Force -Path $Dist | Out-Null
-    Copy-Item "target\release\monitor-switch-app.exe" (Join-Path $Dist "Monitor Switch.exe") -Force
+    $App = Join-Path $Dist "Monitor Switch.exe"
+    Copy-Item "target\release\monitor-switch-app.exe" $App -Force
+
+    Add-Type -AssemblyName System.Drawing
+    $Icon = [System.Drawing.Icon]::ExtractAssociatedIcon($App)
+    if ($null -eq $Icon) {
+        throw "The Windows executable does not contain an application icon."
+    }
+    $Icon.Dispose()
     Copy-Item "README.md" $Dist -Force
     Copy-Item "LICENSE" $Dist -Force
 

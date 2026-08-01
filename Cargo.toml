@@ -9,6 +9,9 @@ readme = "README.md"
 keywords = ["ddc", "monitor", "display", "macos", "windows"]
 categories = ["hardware-support", "command-line-utilities"]
 
+[build-dependencies]
+embed-resource = "3.0.11"
+
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 ddc = "0.2"
