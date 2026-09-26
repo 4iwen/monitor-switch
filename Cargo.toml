@@ -1,6 +1,6 @@
 [package]
 name = "monitor-switch"
-version = "0.2.1"
+version = "0.4.0"
 edition = "2021"
 rust-version = "1.82"
 description = "A lightweight native menu-bar monitor input switcher using DDC/CI."
@@ -16,6 +16,7 @@ embed-resource = "3.0.11"
 clap = { version = "4", features = ["derive"] }
 ddc = "0.2"
 ddc-hi = "0.4"
+global-hotkey = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tao = "0.35"

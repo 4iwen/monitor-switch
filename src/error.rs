@@ -2,6 +2,8 @@ use std::io;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
+    #[error("{0}")]
+    Shortcut(String),
     #[error("config file already exists at {0}")]
     ConfigAlreadyExists(String),
 

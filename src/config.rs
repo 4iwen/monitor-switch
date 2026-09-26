@@ -21,6 +21,9 @@ pub struct Config {
 
     #[serde(default)]
     pub profiles: Vec<SourceProfile>,
+
+    #[serde(default)]
+    pub shortcuts: Vec<crate::shortcuts::ShortcutBinding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +93,7 @@ impl Default for Config {
             default_backend: BackendKind::Auto,
             default_display: None,
             profiles: Vec::new(),
+            shortcuts: Vec::new(),
         }
     }
 }
@@ -206,6 +210,7 @@ mod tests {
     #[test]
     fn profile_backend_overrides_default_backend() {
         let config = Config {
+            shortcuts: Vec::new(),
             schema_version: 2,
             default_backend: BackendKind::Ddcutil,
             default_display: None,
@@ -226,6 +231,7 @@ mod tests {
     #[test]
     fn profile_display_overrides_default_display() {
         let config = Config {
+            shortcuts: Vec::new(),
             schema_version: 2,
             default_backend: BackendKind::Auto,
             default_display: Some("1".to_string()),
@@ -277,5 +283,6 @@ value = 17
         .unwrap();
 
         assert!(config.profiles[0].show_in_menu);
+        assert!(config.shortcuts.is_empty());
     }
 }

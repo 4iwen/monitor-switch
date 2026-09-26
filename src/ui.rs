@@ -13,6 +13,9 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UiState {
+    pub shortcuts: Vec<crate::shortcuts::ShortcutBinding>,
+    pub shortcut_error: Option<String>,
+    pub previous_inputs: std::collections::HashMap<String, u16>,
     pub monitor: MonitorView,
     pub monitors: Vec<MonitorView>,
     pub inputs: Vec<InputView>,
@@ -51,6 +54,49 @@ pub struct MonitorView {
     pub connected: bool,
     pub inputs: Vec<InputView>,
     pub available_inputs: Vec<InputView>,
+}
+
+impl UiState {
+    pub fn update_current_input(&mut self, selector: &str, current: Option<u16>) {
+        let Some(monitor) = self
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.selector == selector)
+        else {
+            return;
+        };
+
+        monitor.connected = current.is_some();
+        if let Some(value) = current {
+            monitor.current_value = Some(value);
+            monitor.current_hex = Some(format_input_value(value));
+            for input in &mut monitor.available_inputs {
+                input.current = input.value == value;
+            }
+            monitor.inputs = menu_inputs(&monitor.available_inputs);
+        }
+        self.sync_primary_monitor();
+    }
+
+    pub fn mark_switch_sent(&mut self, selector: &str, value: u16) {
+        self.update_current_input(selector, Some(value));
+        if let Some(monitor) = self
+            .monitors
+            .iter_mut()
+            .find(|monitor| monitor.selector == selector)
+        {
+            monitor.connected = false;
+        }
+        self.sync_primary_monitor();
+    }
+
+    fn sync_primary_monitor(&mut self) {
+        if let Some(first) = self.monitors.first().cloned() {
+            self.monitor = first.clone();
+            self.inputs = first.inputs;
+            self.available_inputs = first.available_inputs;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -105,6 +151,9 @@ fn assemble_state(config_path: &Path, config: Config, monitors: Vec<MonitorView>
     let monitor = monitors.first().cloned().unwrap_or_else(empty_monitor);
 
     UiState {
+        shortcuts: config.shortcuts.clone(),
+        shortcut_error: None,
+        previous_inputs: std::collections::HashMap::new(),
         inputs: monitor.inputs.clone(),
         available_inputs: monitor.available_inputs.clone(),
         monitor,
@@ -545,5 +594,66 @@ mod tests {
         assert_eq!(state.monitors.len(), 1);
         assert!(!state.monitor.connected);
         assert!(!state.available_inputs.is_empty());
+    }
+
+    #[test]
+    fn failed_read_keeps_last_known_input() {
+        let mut state = build_cached_state(Path::new("/path/that/does/not/exist/config.toml"));
+        state.update_current_input("", Some(0x11));
+        state.update_current_input("", None);
+
+        assert_eq!(state.monitor.current_value, Some(0x11));
+        assert!(!state.monitor.connected);
+        assert_eq!(
+            state
+                .monitor
+                .inputs
+                .iter()
+                .filter(|input| input.current)
+                .count(),
+            1
+        );
+        assert!(state
+            .monitor
+            .inputs
+            .iter()
+            .any(|input| input.value == 0x11 && input.current));
+    }
+
+    #[test]
+    fn newly_detected_hidden_input_appears_in_menu() {
+        let mut state = build_cached_state(Path::new("/path/that/does/not/exist/config.toml"));
+        let hidden = state.monitors[0]
+            .available_inputs
+            .iter()
+            .find(|input| !input.show_in_menu)
+            .unwrap()
+            .value;
+        state.update_current_input("", Some(hidden));
+
+        assert!(state
+            .monitor
+            .inputs
+            .iter()
+            .any(|input| input.value == hidden && input.current));
+    }
+
+    #[test]
+    fn sent_switch_is_shown_but_not_claimed_verified() {
+        let mut state = build_cached_state(Path::new("/path/that/does/not/exist/config.toml"));
+        state.update_current_input("", Some(0x11));
+        state.mark_switch_sent("", 0x12);
+
+        assert_eq!(state.monitor.current_value, Some(0x12));
+        assert!(!state.monitor.connected);
+        assert_eq!(
+            state
+                .monitor
+                .inputs
+                .iter()
+                .filter(|input| input.current)
+                .count(),
+            1
+        );
     }
 }

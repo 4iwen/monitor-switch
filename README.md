@@ -5,7 +5,7 @@ menu bar or system tray. It sends DDC/CI VCP `0x60` commands directly, so normal
 use does not require BetterDisplay, ddcctl, ddcutil, or ControlMyMonitor.
 
 Monitor Switch is deliberately small and user initiated: it does nothing until
-you open the menu and choose an input. There is no USB listener, cloud service,
+you choose an input or press a configured shortcut. There is no USB listener, cloud service,
 account, analytics, or background polling.
 
 ## Features
@@ -13,6 +13,8 @@ account, analytics, or background polling.
 - Built-in DDC/CI on macOS and Windows
 - Native macOS menu and native Windows system-tray menu
 - One-click switching between named inputs
+- Optional global shortcuts for individual inputs and switching back
+- Independent previous-input history for each display
 - Multiple monitors with independent input names
 - Per-input control over which sources appear in the tray menu
 - Automatic current-input checkmark when the display supports reading VCP `0x60`
@@ -90,6 +92,22 @@ currently active, but it usually cannot report whether a cable is physically
 connected to every inactive port. Monitor Switch shows inputs reported by the
 monitor by default, keeps generic fallback candidates hidden, and lets every
 input be shown or hidden in Settings.
+
+## Keyboard shortcuts and switching back
+
+Settings includes a shortcut recorder below each input name and a separate
+recorder for returning to the previous input on that display. Focus a recorder,
+press a combination containing Control, Alt/Option, or Command/Win, and save.
+Use the clear button or Delete/Backspace to remove a binding. No shortcuts are
+assigned by default. Duplicates and system registration conflicts are reported
+without replacing the existing saved bindings.
+
+The menu's **切回** action uses per-display history from successful reads and
+accepted switch commands. History lasts for the current app session; a command
+being accepted is not a guarantee that the monitor physically switched. Before
+returning, the app reads the current input again; if that read fails, it does not
+guess or send a switch command. Shortcuts work while the app is running and the
+computer can communicate with the monitor, including when the tray menu is closed.
 
 ## CLI
 

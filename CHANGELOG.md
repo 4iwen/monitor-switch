@@ -3,6 +3,33 @@
 All notable changes to Monitor Switch are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-09-26
+
+### Added
+
+- Optional global shortcuts for each display input and for returning to the
+  previous input, using native macOS and Windows hotkey registration.
+- Shortcut recording and clearing in Settings, duplicate validation, and
+  registration conflict feedback. Existing shortcuts pause while recording.
+- Per-display previous-input history for the current app session. Returning
+  first reads the actual input so manual switches from another device are handled.
+- Offline settings preview and browser interaction/layout regression checks.
+
+### Fixed
+
+- Stale reads cannot overwrite a newer switch. Transient read failures preserve
+  the last known input as unverified instead of clearing it.
+- Native tray menu identity remains stable during state updates.
+- Settings retain drafts on refresh, confirm discarding changes, and show save
+  errors inline. Hidden monitor-reported inputs now persist correctly.
+- Newly created input profiles inherit the configured DDC backend.
+
+### Changed
+
+- The previous-input shortcut is prominently placed above the input list in
+  Settings, with an explicit recording field.
+- Supersedes the local, unpublished 0.3.0 development build.
+
 ## [0.2.1] - 2026-08-01
 
 ### Added

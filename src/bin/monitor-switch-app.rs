@@ -1,5 +1,6 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
+use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use std::collections::HashMap;
 use std::{
     error::Error,
@@ -12,6 +13,8 @@ use monitor_switch::{
     backends::{get_input_source, set_input_source, ReadRequest, SwitchRequest},
     config::{default_config_path, Config, SourceProfile},
     error::Result,
+    history::InputHistory,
+    shortcuts::{ShortcutBinding, Shortcuts},
     ui::{build_cached_state, build_state, OperationStatus, UiState},
 };
 use serde::Deserialize;
@@ -23,28 +26,45 @@ use tao::{
 };
 #[cfg(target_os = "macos")]
 use tray_icon::menu::ContextMenu;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, MenuItemKind, PredefinedMenuItem,
+};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use wry::{WebView, WebViewBuilder};
 
 #[derive(Debug, Clone)]
 enum UserEvent {
+    PreviousReady {
+        epoch: u64,
+        display: String,
+        current: std::result::Result<u16, String>,
+    },
+    HotKey(u32),
     TrayActivated,
     PrewarmSettings,
-    RebuildMenu,
     NativeMenu(MenuEvent),
     Ipc(String),
     SwitchFinished {
+        epoch: u64,
         value: u16,
         display: String,
         result: std::result::Result<(), String>,
     },
-    RefreshFinished(Box<UiState>),
-    CurrentInputsRefreshed(Vec<(String, Option<u16>)>),
+    RefreshFinished {
+        epoch: u64,
+        sequence: u64,
+        state: Box<UiState>,
+    },
+    CurrentInputsRefreshed {
+        epoch: u64,
+        sequence: u64,
+        values: Vec<(String, Option<u16>)>,
+    },
 }
 
 #[derive(Debug, Clone)]
 enum NativeMenuAction {
+    Previous(String),
     Switch {
         value: u16,
         display: String,
@@ -70,7 +90,13 @@ enum IpcCommand {
     #[serde(rename = "closeSettings")]
     CloseSettings,
     #[serde(rename = "saveLabels")]
-    SaveLabels { items: Vec<LabelUpdate> },
+    SaveLabels {
+        items: Vec<LabelUpdate>,
+        #[serde(default)]
+        shortcuts: Option<Vec<ShortcutBinding>>,
+    },
+    #[serde(rename = "recordShortcut")]
+    RecordShortcut { active: bool },
 }
 
 struct WindowBundle {
@@ -79,25 +105,41 @@ struct WindowBundle {
 }
 
 struct AppState {
+    shortcuts: Option<Shortcuts>,
+    history: InputHistory,
+    recording_shortcut: bool,
+    refresh_pending: bool,
     config_path: PathBuf,
     tray_icon: Option<TrayIcon>,
     settings: Option<WindowBundle>,
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
+    native_menu: Option<Menu>,
     native_input_items: HashMap<String, CheckMenuItem>,
     native_menu_signature: Vec<String>,
+    epoch: u64,
+    read_sequence: u64,
+    full_refresh_sequence: u64,
 }
 
 impl AppState {
     fn new(config_path: PathBuf) -> Self {
         Self {
+            shortcuts: None,
+            history: InputHistory::default(),
+            recording_shortcut: false,
+            refresh_pending: false,
             config_path,
             tray_icon: None,
             settings: None,
             ui_state: None,
             native_menu_actions: HashMap::new(),
+            native_menu: None,
             native_input_items: HashMap::new(),
             native_menu_signature: Vec::new(),
+            epoch: 0,
+            read_sequence: 0,
+            full_refresh_sequence: 0,
         }
     }
 
@@ -111,7 +153,14 @@ impl AppState {
         if let Err(error) = migrate_legacy_config(&self.config_path) {
             eprintln!("failed to migrate legacy configuration: {error}");
         }
-        let state = build_cached_state(&self.config_path);
+        let mut state = build_cached_state(&self.config_path);
+        match Shortcuts::new() {
+            Ok(mut shortcuts) => {
+                state.shortcut_error = shortcuts.replace(&state.shortcuts).err();
+                self.shortcuts = Some(shortcuts);
+            }
+            Err(error) => state.shortcut_error = Some(error),
+        }
         let mut tray_builder = TrayIconBuilder::new()
             .with_tooltip("Monitor Switch")
             .with_icon(build_icon()?);
@@ -124,6 +173,7 @@ impl AppState {
         self.native_menu_actions = actions;
         self.native_input_items = input_items;
         self.native_menu_signature = menu_signature(&state);
+        self.native_menu = Some(menu.clone());
         tray_builder = tray_builder
             .with_menu(Box::new(menu))
             .with_menu_on_left_click(true)
@@ -159,6 +209,7 @@ impl AppState {
         };
 
         match action {
+            NativeMenuAction::Previous(display) => self.switch_previous(&display, proxy),
             NativeMenuAction::Switch {
                 value,
                 display,
@@ -186,12 +237,22 @@ impl AppState {
         };
 
         match command {
+            IpcCommand::RecordShortcut { active } => {
+                self.recording_shortcut = active;
+                if let (Some(shortcuts), Some(state)) = (&mut self.shortcuts, &mut self.ui_state) {
+                    state.shortcut_error = shortcuts
+                        .replace(if active { &[] } else { &state.shortcuts })
+                        .err();
+                }
+                self.refresh_settings();
+            }
             IpcCommand::CloseSettings => {
                 if let Some(settings) = &self.settings {
                     settings.window.set_visible(false);
                 }
             }
-            IpcCommand::SaveLabels { items } => match self.save_labels(items) {
+            IpcCommand::SaveLabels { items, shortcuts } => match self.save_labels(items, shortcuts)
+            {
                 Ok(()) => {
                     self.refresh_async(proxy);
                     self.evaluate_settings(
@@ -206,6 +267,116 @@ impl AppState {
                         ));
                 }
             },
+        }
+    }
+
+    fn switch_previous(&mut self, display: &str, proxy: EventLoopProxy<UserEvent>) {
+        let Some(state) = &mut self.ui_state else {
+            return;
+        };
+        if state.operation.status == OperationStatus::Switching {
+            return;
+        }
+        state.operation.status = OperationStatus::Switching;
+        state.operation.target_display = Some(display.to_owned());
+        state.operation.target_value = state
+            .monitors
+            .iter()
+            .find(|monitor| monitor.selector == display)
+            .and_then(|monitor| monitor.current_value);
+        self.epoch += 1;
+        self.read_sequence += 1;
+        let epoch = self.epoch;
+        let config_path = self.config_path.clone();
+        let display = display.to_owned();
+        self.sync_native_input_items();
+        thread::spawn(move || {
+            let current = Config::load(&config_path)
+                .and_then(|config| {
+                    get_input_source(ReadRequest {
+                        backend: config.default_backend,
+                        display: (!display.is_empty()).then_some(display.as_str()),
+                    })
+                })
+                .map_err(|error| error.to_string());
+            let _ = proxy.send_event(UserEvent::PreviousReady {
+                epoch,
+                display,
+                current,
+            });
+        });
+    }
+
+    fn handle_previous_ready(
+        &mut self,
+        epoch: u64,
+        display: String,
+        current: std::result::Result<u16, String>,
+        proxy: EventLoopProxy<UserEvent>,
+    ) {
+        if epoch != self.epoch {
+            return;
+        }
+        let Some(state) = &mut self.ui_state else {
+            return;
+        };
+        state.operation.status = OperationStatus::Idle;
+        let message = match current {
+            Ok(value) => {
+                self.history.observe(&display, value);
+                state.previous_inputs = self.history.previous();
+                state.update_current_input(&display, Some(value));
+                if let Some(previous) = state.previous_inputs.get(&display).copied() {
+                    self.begin_switch(Some(previous), Some(display), None, proxy);
+                    return;
+                }
+                "还没有可返回的输入源，请先完成一次切换".to_owned()
+            }
+            Err(error) => {
+                state.update_current_input(&display, None);
+                format!("无法确认当前输入源，未执行切回：{error}")
+            }
+        };
+        state.operation.status = OperationStatus::Error;
+        state.operation.message = Some(message);
+        self.rebuild_native_menu();
+        self.refresh_settings();
+        if self.refresh_pending {
+            self.refresh_async(proxy);
+        }
+    }
+
+    fn handle_hotkey(&mut self, id: u32, proxy: EventLoopProxy<UserEvent>) {
+        if self.recording_shortcut {
+            return;
+        }
+        let Some(binding) = self
+            .shortcuts
+            .as_ref()
+            .and_then(|shortcuts| shortcuts.action(id))
+        else {
+            return;
+        };
+        let display = self
+            .ui_state
+            .as_ref()
+            .and_then(|state| {
+                if binding.display.is_empty() {
+                    state.monitors.first()
+                } else {
+                    state
+                        .monitors
+                        .iter()
+                        .find(|monitor| monitor.selector == binding.display)
+                }
+            })
+            .map(|monitor| monitor.selector.clone());
+        let Some(display) = display else {
+            return;
+        };
+        match binding.value {
+            Some(value) => self.begin_switch(Some(value), Some(display), None, proxy),
+            None => self.switch_previous(&display, proxy),
         }
     }
 
@@ -233,6 +404,9 @@ impl AppState {
             state.operation.target_display = display.clone();
             state.operation.message = None;
         }
+        self.epoch += 1;
+        self.read_sequence += 1;
+        let epoch = self.epoch;
         self.sync_native_input_items();
         self.refresh_settings();
 
@@ -243,6 +417,7 @@ impl AppState {
                 .map(|_| ())
                 .map_err(|error| error.to_string());
             let _ = proxy.send_event(UserEvent::SwitchFinished {
+                epoch,
                 value,
                 display: display_for_event,
                 result,
@@ -292,8 +467,22 @@ impl AppState {
         Ok(())
     }
 
-    fn save_labels(&self, items: Vec<LabelUpdate>) -> Result<()> {
-        let mut config = Config::load(&self.config_path).unwrap_or_default();
+    fn save_labels(
+        &mut self,
+        items: Vec<LabelUpdate>,
+        bindings: Option<Vec<ShortcutBinding>>,
+    ) -> Result<()> {
+        let mut config = match Config::load(&self.config_path) {
+            Ok(config) => config,
+            Err(monitor_switch::error::AppError::ConfigMissing(_)) => Config::default(),
+            Err(error) => return Err(error),
+        };
+        let old_bindings = config.shortcuts.clone();
+        if let Some(bindings) = bindings {
+            monitor_switch::shortcuts::validate(&bindings)
+                .map_err(monitor_switch::error::AppError::Shortcut)?;
+            config.shortcuts = bindings;
+        }
         for item in items {
             let label = item.label.trim();
             if let Some(profile) = config.profiles.iter_mut().find(|profile| {
@@ -309,7 +498,7 @@ impl AppState {
                 profile.label = custom_label(item.value, label);
                 profile.show_in_menu = item.show_in_menu;
                 profile.display = (!item.display.is_empty()).then_some(item.display.clone());
-            } else if item.show_in_menu || custom_label(item.value, label).is_some() {
+            } else {
                 config.profiles.push(SourceProfile {
                     name: if item.display_index == 0 {
                         format!("input-{:02x}", item.value)
@@ -323,12 +512,30 @@ impl AppState {
                     value: item.value,
                     label: custom_label(item.value, label),
                     display: (!item.display.is_empty()).then_some(item.display.clone()),
-                    backend: Some(monitor_switch::config::BackendKind::Native),
+                    backend: None,
                     show_in_menu: item.show_in_menu,
                 });
             }
         }
-        config.save(&self.config_path)?;
+        if let Some(shortcuts) = &mut self.shortcuts {
+            shortcuts
+                .replace(&config.shortcuts)
+                .map_err(monitor_switch::error::AppError::Shortcut)?;
+        } else if !config.shortcuts.is_empty() {
+            return Err(monitor_switch::error::AppError::Shortcut(
+                "系统快捷键服务不可用".into(),
+            ));
+        }
+        if let Err(error) = config.save(&self.config_path) {
+            if let Some(shortcuts) = &mut self.shortcuts {
+                let _ = shortcuts.replace(&old_bindings);
+            }
+            return Err(error);
+        }
+        if let Some(state) = &mut self.ui_state {
+            state.shortcuts = config.shortcuts;
+            state.shortcut_error = None;
+        }
         Ok(())
     }
 
@@ -339,14 +546,19 @@ impl AppState {
 
         let signature = menu_signature(state);
         if signature != self.native_menu_signature {
-            let Some(tray_icon) = &self.tray_icon else {
+            let Some(menu) = &self.native_menu else {
                 return;
             };
-            let (menu, actions, input_items) = build_native_menu(state);
+            while !menu.items().is_empty() {
+                menu.remove_at(0);
+            }
+            let (actions, input_items) = populate_native_menu(menu, state);
             self.native_menu_actions = actions;
             self.native_input_items = input_items;
             self.native_menu_signature = signature;
-            tray_icon.set_menu(Some(Box::new(menu)));
+        }
+        if let Some(menu) = &self.native_menu {
+            decorate_native_menu_item(menu, 0, Some(&menu_status_subtitle(state)), None);
         }
         self.sync_native_input_items();
     }
@@ -360,30 +572,40 @@ impl AppState {
         }
     }
 
-    fn schedule_menu_rebuild(&self, proxy: EventLoopProxy<UserEvent>) {
+    fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>) {
         if self
             .ui_state
             .as_ref()
-            .is_none_or(|state| menu_signature(state) == self.native_menu_signature)
+            .is_some_and(|state| state.operation.status == OperationStatus::Switching)
+        {
+            self.refresh_pending = true;
+            return;
+        }
+        self.refresh_pending = false;
+        self.full_refresh_sequence += 1;
+        let sequence = self.full_refresh_sequence;
+        let config_path = self.config_path.clone();
+        let epoch = self.epoch;
+        thread::spawn(move || {
+            let _ = proxy.send_event(UserEvent::RefreshFinished {
+                epoch,
+                sequence,
+                state: Box::new(build_state(&config_path)),
+            });
+        });
+    }
+
+    fn refresh_current_inputs_async(&mut self, proxy: EventLoopProxy<UserEvent>, delay_ms: u64) {
+        if self
+            .ui_state
+            .as_ref()
+            .is_some_and(|state| state.operation.status == OperationStatus::Switching)
         {
             return;
         }
-        thread::spawn(move || {
-            thread::sleep(std::time::Duration::from_millis(450));
-            let _ = proxy.send_event(UserEvent::RebuildMenu);
-        });
-    }
-
-    fn refresh_async(&self, proxy: EventLoopProxy<UserEvent>) {
-        let config_path = self.config_path.clone();
-        thread::spawn(move || {
-            let _ = proxy.send_event(UserEvent::RefreshFinished(Box::new(build_state(
-                &config_path,
-            ))));
-        });
-    }
-
-    fn refresh_current_inputs_async(&self, proxy: EventLoopProxy<UserEvent>) {
+        self.read_sequence += 1;
+        let epoch = self.epoch;
+        let sequence = self.read_sequence;
         let config_path = self.config_path.clone();
         let displays = self
             .ui_state
@@ -397,6 +619,9 @@ impl AppState {
             })
             .unwrap_or_default();
         thread::spawn(move || {
+            if delay_ms > 0 {
+                thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
             let config = Config::load(&config_path).unwrap_or_default();
             let values = displays
                 .into_iter()
@@ -409,43 +634,73 @@ impl AppState {
                     (display, current)
                 })
                 .collect();
-            let _ = proxy.send_event(UserEvent::CurrentInputsRefreshed(values));
+            let _ = proxy.send_event(UserEvent::CurrentInputsRefreshed {
+                epoch,
+                sequence,
+                values,
+            });
         });
     }
 
-    fn handle_refresh_finished(&mut self, state: UiState, proxy: EventLoopProxy<UserEvent>) {
+    fn handle_refresh_finished(&mut self, mut state: UiState, epoch: u64, sequence: u64) {
+        if epoch != self.epoch || sequence != self.full_refresh_sequence {
+            return;
+        }
+        self.read_sequence += 1;
+        for monitor in &state.monitors {
+            if monitor.connected {
+                if let Some(value) = monitor.current_value {
+                    self.history.observe(&monitor.selector, value);
+                }
+            }
+        }
+        state.previous_inputs = self.history.previous();
+        if let Some(previous) = &self.ui_state {
+            state.shortcut_error = previous.shortcut_error.clone();
+            let remembered = state
+                .monitors
+                .iter()
+                .filter(|monitor| monitor.current_value.is_none())
+                .filter_map(|monitor| {
+                    previous
+                        .monitors
+                        .iter()
+                        .find(|old| old.selector == monitor.selector)
+                        .and_then(|old| {
+                            old.current_value
+                                .map(|value| (monitor.selector.clone(), value))
+                        })
+                })
+                .collect::<Vec<_>>();
+            for (selector, value) in remembered {
+                state.mark_switch_sent(&selector, value);
+            }
+        }
         self.ui_state = Some(state);
-        self.sync_native_input_items();
+        self.rebuild_native_menu();
         self.refresh_settings();
-        self.schedule_menu_rebuild(proxy);
     }
 
-    fn handle_current_inputs_refreshed(&mut self, values: Vec<(String, Option<u16>)>) {
+    fn handle_current_inputs_refreshed(
+        &mut self,
+        values: Vec<(String, Option<u16>)>,
+        epoch: u64,
+        sequence: u64,
+    ) {
+        if epoch != self.epoch || sequence != self.read_sequence {
+            return;
+        }
         let Some(state) = &mut self.ui_state else {
             return;
         };
         for (display, current) in values {
-            if let Some(monitor) = state
-                .monitors
-                .iter_mut()
-                .find(|monitor| monitor.selector == display)
-            {
-                monitor.current_value = current;
-                monitor.current_hex = current.map(|value| format!("0x{value:02x}"));
-                monitor.connected = current.is_some();
-                for input in &mut monitor.available_inputs {
-                    input.current = current == Some(input.value);
-                }
-                monitor.inputs = monitor
-                    .available_inputs
-                    .iter()
-                    .filter(|input| input.show_in_menu || input.current)
-                    .cloned()
-                    .collect();
+            if let Some(value) = current {
+                self.history.observe(&display, value);
             }
+            state.update_current_input(&display, current);
         }
-        sync_primary_monitor(state);
-        self.sync_native_input_items();
+        state.previous_inputs = self.history.previous();
+        self.rebuild_native_menu();
         self.refresh_settings();
     }
 
@@ -457,6 +712,34 @@ impl AppState {
         let Some(state) = &self.ui_state else {
             return;
         };
+        if let Some(menu) = &self.native_menu {
+            for item in menu.items() {
+                if let MenuItemKind::MenuItem(item) = item {
+                    if let Some(index) = item
+                        .id()
+                        .as_ref()
+                        .strip_prefix("previous:")
+                        .and_then(|value| value.parse::<usize>().ok())
+                    {
+                        item.set_enabled(
+                            state.operation.status != OperationStatus::Switching
+                                && state.monitors.get(index).is_some_and(|monitor| {
+                                    state.previous_inputs.contains_key(&monitor.selector)
+                                }),
+                        );
+                    }
+                }
+            }
+        }
+        if let Some(tray) = &self.tray_icon {
+            let _ = tray.set_tooltip(Some(
+                state
+                    .operation
+                    .message
+                    .as_deref()
+                    .unwrap_or("Monitor Switch"),
+            ));
+        }
         for (monitor_index, monitor) in state.monitors.iter().enumerate() {
             for input in &monitor.inputs {
                 let id = format!("input:{monitor_index}:{:02x}", input.value);
@@ -464,7 +747,11 @@ impl AppState {
                     let switching = state.operation.status == OperationStatus::Switching
                         && state.operation.target_value == Some(input.value)
                         && state.operation.target_display.as_deref() == Some(&monitor.selector);
-                    item.set_checked(input.current || switching);
+                    item.set_checked(if state.operation.status == OperationStatus::Switching {
+                        switching
+                    } else {
+                        input.current
+                    });
                     item.set_enabled(state.operation.status != OperationStatus::Switching);
                 }
             }
@@ -479,31 +766,21 @@ impl AppState {
 
     fn handle_switch_finished(
         &mut self,
+        epoch: u64,
         value: u16,
         display: String,
         result: std::result::Result<(), String>,
         proxy: EventLoopProxy<UserEvent>,
     ) {
+        if epoch != self.epoch {
+            return;
+        }
         match result {
             Ok(()) => {
+                self.history.observe(&display, value);
                 if let Some(state) = &mut self.ui_state {
-                    for monitor in &mut state.monitors {
-                        if monitor.selector == display {
-                            monitor.current_value = Some(value);
-                            monitor.current_hex = Some(format!("0x{value:02x}"));
-                            monitor.connected = true;
-                            for input in &mut monitor.available_inputs {
-                                input.current = input.value == value;
-                            }
-                            monitor.inputs = monitor
-                                .available_inputs
-                                .iter()
-                                .filter(|input| input.show_in_menu || input.current)
-                                .cloned()
-                                .collect();
-                        }
-                    }
-                    sync_primary_monitor(state);
+                    state.previous_inputs = self.history.previous();
+                    state.mark_switch_sent(&display, value);
                     state.operation.status = OperationStatus::Success;
                     state.operation.target_value = Some(value);
                     state.operation.target_display = Some(display);
@@ -518,28 +795,31 @@ impl AppState {
                 }
             }
         }
-        self.sync_native_input_items();
+        self.rebuild_native_menu();
         self.refresh_settings();
-        self.schedule_menu_rebuild(proxy);
+        if self
+            .ui_state
+            .as_ref()
+            .is_some_and(|state| state.operation.status == OperationStatus::Success)
+        {
+            self.refresh_current_inputs_async(proxy.clone(), 700);
+        }
+        if self.refresh_pending {
+            self.refresh_async(proxy);
+        }
     }
 
     fn handle_close(&self, window_id: WindowId, control_flow: &mut ControlFlow) {
         if let Some(settings) = &self.settings {
             if settings.window.id() == window_id {
-                settings.window.set_visible(false);
+                let _ = settings.webview.evaluate_script(
+                    "window.monitorSwitchRequestClose && window.monitorSwitchRequestClose();",
+                );
                 return;
             }
         }
 
         *control_flow = ControlFlow::Exit;
-    }
-}
-
-fn sync_primary_monitor(state: &mut UiState) {
-    if let Some(first) = state.monitors.first().cloned() {
-        state.monitor = first.clone();
-        state.inputs = first.inputs;
-        state.available_inputs = first.available_inputs;
     }
 }
 
@@ -563,6 +843,11 @@ fn menu_signature(state: &UiState) -> Vec<String> {
                         "monitor:{monitor_index}:{}:{}",
                         monitor.selector, monitor.name
                     )];
+                    entries.push(format!(
+                        "previous:{:?}",
+                        state.previous_inputs.get(&monitor.selector)
+                    ));
+                    entries.push(format!("shortcuts:{:?}", state.shortcuts));
                     entries.extend(monitor.inputs.iter().map(|input| {
                         format!(
                             "input:{monitor_index}:{:02x}:{}:{}",
@@ -603,6 +888,12 @@ fn main() {
     let config_path = default_config_path();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let hotkey_proxy = proxy.clone();
+    GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
+        if event.state == HotKeyState::Released {
+            let _ = hotkey_proxy.send_event(UserEvent::HotKey(event.id));
+        }
+    }));
 
     let menu_proxy = proxy.clone();
     MenuEvent::set_event_handler(Some(move |event| {
@@ -621,6 +912,12 @@ fn main() {
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::UserEvent(UserEvent::PreviousReady {
+                epoch,
+                display,
+                current,
+            }) => state.handle_previous_ready(epoch, display, current, proxy.clone()),
+            Event::UserEvent(UserEvent::HotKey(id)) => state.handle_hotkey(id, proxy.clone()),
             Event::NewEvents(StartCause::Init) => {
                 if let Err(error) = state.init(target, proxy.clone()) {
                     eprintln!("failed to initialize app: {error}");
@@ -628,13 +925,10 @@ fn main() {
                 }
             }
             Event::UserEvent(UserEvent::TrayActivated) => {
-                state.refresh_current_inputs_async(proxy.clone());
+                state.refresh_current_inputs_async(proxy.clone(), 0);
             }
             Event::UserEvent(UserEvent::PrewarmSettings) => {
                 state.prewarm_settings(target, proxy.clone());
-            }
-            Event::UserEvent(UserEvent::RebuildMenu) => {
-                state.rebuild_native_menu();
             }
             Event::UserEvent(UserEvent::NativeMenu(event)) => {
                 state.handle_native_menu(&event.id, target, proxy.clone(), control_flow);
@@ -643,17 +937,26 @@ fn main() {
                 state.handle_ipc(&body, proxy.clone());
             }
             Event::UserEvent(UserEvent::SwitchFinished {
+                epoch,
                 value,
                 display,
                 result,
             }) => {
-                state.handle_switch_finished(value, display, result, proxy.clone());
+                state.handle_switch_finished(epoch, value, display, result, proxy.clone());
             }
-            Event::UserEvent(UserEvent::RefreshFinished(ui_state)) => {
-                state.handle_refresh_finished(*ui_state, proxy.clone());
+            Event::UserEvent(UserEvent::RefreshFinished {
+                epoch,
+                sequence,
+                state: ui_state,
+            }) => {
+                state.handle_refresh_finished(*ui_state, epoch, sequence);
             }
-            Event::UserEvent(UserEvent::CurrentInputsRefreshed(values)) => {
-                state.handle_current_inputs_refreshed(values);
+            Event::UserEvent(UserEvent::CurrentInputsRefreshed {
+                epoch,
+                sequence,
+                values,
+            }) => {
+                state.handle_current_inputs_refreshed(values, epoch, sequence);
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -745,26 +1048,24 @@ fn build_native_menu(
     HashMap<String, CheckMenuItem>,
 ) {
     let menu = Menu::new();
+    let (actions, input_items) = populate_native_menu(&menu, state);
+    (menu, actions, input_items)
+}
+
+fn populate_native_menu(
+    menu: &Menu,
+    state: &UiState,
+) -> (
+    HashMap<String, NativeMenuAction>,
+    HashMap<String, CheckMenuItem>,
+) {
     let mut actions = HashMap::new();
     let mut input_items = HashMap::new();
-    let connected = if state.monitor.connected {
-        "DDC/CI 已连接"
-    } else {
-        "无法读取当前输入源"
-    };
-    let status_subtitle = match state.operation.status {
-        OperationStatus::Error => state
-            .operation
-            .message
-            .as_deref()
-            .unwrap_or("切换失败")
-            .to_string(),
-        _ => format!("{} · {connected}", state.monitor.name),
-    };
+    let status_subtitle = menu_status_subtitle(state);
 
     let header = MenuItem::new("Monitor Switch", false, None);
     let _ = menu.append(&header);
-    decorate_native_menu_item(&menu, 0, Some(&status_subtitle), Some("display"));
+    decorate_native_menu_item(menu, 0, Some(&status_subtitle), Some("display"));
     let _ = menu.append(&PredefinedMenuItem::separator());
 
     for (monitor_index, monitor) in state.monitors.iter().enumerate() {
@@ -772,7 +1073,7 @@ fn build_native_menu(
             let monitor_item = MenuItem::new(monitor.name.replace('&', "&&"), false, None);
             let _ = menu.append(&monitor_item);
             decorate_native_menu_item(
-                &menu,
+                menu,
                 menu.items().len() - 1,
                 Some(&monitor.subtitle),
                 Some("display"),
@@ -781,14 +1082,34 @@ fn build_native_menu(
 
         for input in &monitor.inputs {
             let id = format!("input:{monitor_index}:{:02x}", input.value);
+            let binding = state.shortcuts.iter().find(|binding| {
+                binding.display == monitor.selector && binding.value == Some(input.value)
+            });
+            let title = if cfg!(target_os = "windows") {
+                binding
+                    .map(|binding| {
+                        format!(
+                            "{}    {}",
+                            input.name,
+                            monitor_switch::shortcuts::label(&binding.shortcut)
+                        )
+                    })
+                    .unwrap_or_else(|| input.name.clone())
+            } else {
+                input.name.clone()
+            };
             let switching = state.operation.status == OperationStatus::Switching
                 && state.operation.target_value == Some(input.value)
                 && state.operation.target_display.as_deref() == Some(&monitor.selector);
             let item = CheckMenuItem::with_id(
                 id.clone(),
-                input.name.replace('&', "&&"),
+                title.replace('&', "&&"),
                 state.operation.status != OperationStatus::Switching,
-                switching || input.current,
+                if state.operation.status == OperationStatus::Switching {
+                    switching
+                } else {
+                    input.current
+                },
                 None,
             );
             let _ = menu.append(&item);
@@ -799,7 +1120,20 @@ fn build_native_menu(
             } else {
                 input.subtitle.as_str()
             };
-            decorate_native_menu_item(&menu, index, Some(subtitle), Some("cable.connector"));
+            let hint = state
+                .shortcuts
+                .iter()
+                .find(|binding| {
+                    binding.display == monitor.selector && binding.value == Some(input.value)
+                })
+                .map(|binding| {
+                    format!(
+                        "{subtitle} · {}",
+                        monitor_switch::shortcuts::label(&binding.shortcut)
+                    )
+                })
+                .unwrap_or_else(|| subtitle.to_owned());
+            decorate_native_menu_item(menu, index, Some(&hint), Some("cable.connector"));
             actions.insert(
                 id,
                 NativeMenuAction::Switch {
@@ -810,6 +1144,50 @@ fn build_native_menu(
             );
         }
 
+        let previous = state.previous_inputs.get(&monitor.selector);
+        let label = previous
+            .map(|value| {
+                let name = monitor
+                    .available_inputs
+                    .iter()
+                    .find(|input| input.value == *value)
+                    .map(|input| input.name.clone())
+                    .unwrap_or_else(|| monitor_switch::ui::physical_name(*value).to_owned());
+                format!("切回 {name}")
+            })
+            .unwrap_or_else(|| "切回上一个输入源".into());
+        let previous_id = format!("previous:{monitor_index}");
+        let shortcut = state
+            .shortcuts
+            .iter()
+            .find(|binding| binding.display == monitor.selector && binding.value.is_none())
+            .map(|binding| monitor_switch::shortcuts::label(&binding.shortcut));
+        let label = if cfg!(target_os = "windows") {
+            shortcut
+                .as_ref()
+                .map(|shortcut| format!("{label}    {shortcut}"))
+                .unwrap_or(label)
+        } else {
+            label
+        };
+        let item = MenuItem::with_id(
+            previous_id.clone(),
+            label.replace('&', "&&"),
+            previous.is_some(),
+            None,
+        );
+        let _ = menu.append(&item);
+        decorate_native_menu_item(
+            menu,
+            menu.items().len() - 1,
+            shortcut.as_deref(),
+            Some("arrow.uturn.backward"),
+        );
+        actions.insert(
+            previous_id,
+            NativeMenuAction::Previous(monitor.selector.clone()),
+        );
+
         if monitor_index + 1 < state.monitors.len() {
             let _ = menu.append(&PredefinedMenuItem::separator());
         }
@@ -818,12 +1196,12 @@ fn build_native_menu(
     let _ = menu.append(&PredefinedMenuItem::separator());
     let refresh = MenuItem::with_id("refresh", "刷新", true, None);
     let _ = menu.append(&refresh);
-    decorate_native_menu_item(&menu, menu.items().len() - 1, None, Some("arrow.clockwise"));
+    decorate_native_menu_item(menu, menu.items().len() - 1, None, Some("arrow.clockwise"));
     actions.insert("refresh".to_string(), NativeMenuAction::Refresh);
 
     let settings = MenuItem::with_id("settings", "设置…", true, None);
     let _ = menu.append(&settings);
-    decorate_native_menu_item(&menu, menu.items().len() - 1, None, Some("gearshape"));
+    decorate_native_menu_item(menu, menu.items().len() - 1, None, Some("gearshape"));
     actions.insert("settings".to_string(), NativeMenuAction::OpenSettings);
 
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -831,7 +1209,26 @@ fn build_native_menu(
     let _ = menu.append(&quit);
     actions.insert("quit".to_string(), NativeMenuAction::Quit);
 
-    (menu, actions, input_items)
+    (actions, input_items)
+}
+
+fn menu_status_subtitle(state: &UiState) -> String {
+    let connected = if state.monitor.connected {
+        "DDC/CI 已连接"
+    } else if state.monitor.current_value.is_some() {
+        "当前输入源待确认"
+    } else {
+        "当前输入源未知"
+    };
+    match state.operation.status {
+        OperationStatus::Error => state
+            .operation
+            .message
+            .as_deref()
+            .unwrap_or("切换失败")
+            .to_string(),
+        _ => format!("{} · {connected}", state.monitor.name),
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -895,8 +1292,8 @@ fn create_settings(
     let window = WindowBuilder::new()
         .with_title("Monitor Switch Settings")
         .with_inner_size(LogicalSize::new(width, height))
-        .with_min_inner_size(LogicalSize::new(width, height))
-        .with_resizable(false)
+        .with_min_inner_size(LogicalSize::new(560.0, 400.0))
+        .with_resizable(true)
         .with_visible(false)
         .build(target)?;
     let webview = build_webview(&window, proxy, settings_html(state))?;
@@ -909,9 +1306,9 @@ fn build_webview(
     html: String,
 ) -> wry::Result<WebView> {
     let background = if cfg!(target_os = "macos") {
-        (236, 236, 236, 255)
+        (242, 242, 244, 255)
     } else {
-        (243, 243, 243, 255)
+        (247, 247, 247, 255)
     };
     WebViewBuilder::new()
         .with_html(html)
@@ -1018,4 +1415,59 @@ fn set_pixel(rgba: &mut [u8], width: u32, x: u32, y: u32, color: (u8, u8, u8), a
     rgba[index + 1] = color.1;
     rgba[index + 2] = color.2;
     rgba[index + 3] = alpha;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppState, LabelUpdate};
+    use monitor_switch::config::Config;
+
+    #[test]
+    fn stale_full_refresh_cannot_replace_new_shortcut_settings() {
+        let path = std::path::PathBuf::from("/nonexistent/monitor-switch-test.toml");
+        let stale = monitor_switch::ui::build_cached_state(&path);
+        let mut current = stale.clone();
+        current
+            .shortcuts
+            .push(monitor_switch::shortcuts::ShortcutBinding {
+                display: String::new(),
+                value: Some(17),
+                shortcut: "Control+Alt+Digit1".into(),
+            });
+        let mut app = AppState::new(path);
+        app.ui_state = Some(current);
+        app.full_refresh_sequence = 2;
+        app.handle_refresh_finished(stale, 0, 1);
+        assert_eq!(app.ui_state.as_ref().unwrap().shortcuts.len(), 1);
+    }
+
+    #[test]
+    fn hiding_reported_input_creates_profile_without_forcing_backend() {
+        let path = std::env::temp_dir().join(format!(
+            "monitor-switch-save-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut app = AppState::new(path.clone());
+        app.save_labels(
+            vec![LabelUpdate {
+                value: 0x11,
+                display: String::new(),
+                display_index: 0,
+                label: monitor_switch::ui::physical_name(0x11).to_string(),
+                show_in_menu: false,
+            }],
+            None,
+        )
+        .unwrap();
+
+        let config = Config::load(&path).unwrap();
+        assert_eq!(config.profiles.len(), 1);
+        assert!(!config.profiles[0].show_in_menu);
+        assert_eq!(config.profiles[0].backend, None);
+        std::fs::remove_file(path).unwrap();
+    }
 }
