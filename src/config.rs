@@ -134,9 +134,7 @@ impl Config {
         }
         temporary.write_all(raw.as_bytes())?;
         temporary.as_file().sync_all()?;
-        temporary
-            .persist(path)
-            .map_err(|error| AppError::Io(error.error))?;
+        persist_config(temporary, path)?;
         Ok(())
     }
 
@@ -170,6 +168,32 @@ impl Config {
         }
         true
     }
+}
+
+fn persist_config(temporary: tempfile::NamedTempFile, path: &Path) -> Result<()> {
+    #[cfg(not(target_os = "windows"))]
+    temporary
+        .persist(path)
+        .map_err(|error| AppError::Io(error.error))?;
+    #[cfg(target_os = "windows")]
+    {
+        let mut pending = temporary;
+        for attempt in 0..8 {
+            match pending.persist(path) {
+                Ok(_) => return Ok(()),
+                // Windows can temporarily deny replacement while a reader or
+                // antivirus holds the target. Retry without truncating either file.
+                Err(error)
+                    if matches!(error.error.raw_os_error(), Some(5 | 32 | 33)) && attempt < 7 =>
+                {
+                    pending = error.file;
+                    std::thread::sleep(std::time::Duration::from_millis(10 * (attempt + 1)));
+                }
+                Err(error) => return Err(AppError::Io(error.error)),
+            }
+        }
+    }
+    Ok(())
 }
 
 fn legacy_schema_version() -> u8 {

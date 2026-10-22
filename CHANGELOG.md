@@ -20,6 +20,8 @@ All notable changes to Monitor Switch are documented here. The project follows
   rediscovery without background polling.
 - Configuration writes use a synced temporary file and atomic replacement;
   loading errors are displayed in Settings instead of silently appearing reset.
+- Windows configuration replacement retries transient file-sharing errors
+  without truncating the previous configuration.
 - Shortcut restoration keeps available combinations active when another
   combination is occupied, including after the recorder loses focus.
 - First-run input switching and previous-input reads now use default settings
