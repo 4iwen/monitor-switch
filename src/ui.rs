@@ -13,6 +13,7 @@ use crate::{
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UiState {
+    pub config_error: Option<String>,
     pub shortcuts: Vec<crate::shortcuts::ShortcutBinding>,
     pub shortcut_error: Option<String>,
     pub previous_inputs: std::collections::HashMap<String, u16>,
@@ -126,31 +127,46 @@ pub struct ProfileView {
 }
 
 pub fn build_state(config_path: &Path) -> UiState {
-    let config = Config::load(config_path).unwrap_or_default();
+    let (config, error) = load_ui_config(config_path);
     let descriptors = discovered_or_configured_displays(&config);
     let monitors = descriptors
         .iter()
         .enumerate()
         .map(|(index, descriptor)| monitor_view(descriptor, index, &config, true))
         .collect::<Vec<_>>();
-    assemble_state(config_path, config, monitors)
+    let mut state = assemble_state(config_path, config, monitors);
+    state.config_error = error;
+    state
 }
 
 pub fn build_cached_state(config_path: &Path) -> UiState {
-    let config = Config::load(config_path).unwrap_or_default();
+    let (config, error) = load_ui_config(config_path);
     let descriptors = configured_displays(&config);
     let monitors = descriptors
         .iter()
         .enumerate()
         .map(|(index, descriptor)| monitor_view(descriptor, index, &config, false))
         .collect::<Vec<_>>();
-    assemble_state(config_path, config, monitors)
+    let mut state = assemble_state(config_path, config, monitors);
+    state.config_error = error;
+    state
+}
+
+fn load_ui_config(path: &Path) -> (Config, Option<String>) {
+    match Config::load_or_default(path) {
+        Ok(config) => (config, None),
+        Err(error) => (
+            Config::default(),
+            Some(format!("无法加载配置 {}：{error}", path.display())),
+        ),
+    }
 }
 
 fn assemble_state(config_path: &Path, config: Config, monitors: Vec<MonitorView>) -> UiState {
     let monitor = monitors.first().cloned().unwrap_or_else(empty_monitor);
 
     UiState {
+        config_error: None,
         shortcuts: config.shortcuts.clone(),
         shortcut_error: None,
         previous_inputs: std::collections::HashMap::new(),
@@ -460,6 +476,20 @@ mod tests {
         InputView,
     };
     use crate::config::{BackendKind, Config, SourceProfile};
+
+    #[test]
+    fn cached_state_reports_invalid_configuration_without_changing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(&path, "profiles = [").unwrap();
+        let state = build_cached_state(&path);
+        assert!(state
+            .config_error
+            .as_deref()
+            .unwrap()
+            .contains("无法加载配置"));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "profiles = [");
+    }
 
     #[test]
     fn unassigned_legacy_profile_belongs_to_first_display() {

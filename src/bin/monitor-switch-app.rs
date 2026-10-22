@@ -5,15 +5,19 @@ use std::collections::HashMap;
 use std::{
     error::Error,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
+    time::{Duration, Instant},
 };
 
 use monitor_switch::{
     app_html::settings_html,
     backends::{get_input_source, set_input_source, ReadRequest, SwitchRequest},
     config::{default_config_path, Config, SourceProfile},
+    desktop::{DesktopEvent, DesktopHooks},
     error::Result,
     history::InputHistory,
+    instance::{Acquisition, Instance},
     shortcuts::{ShortcutBinding, Shortcuts},
     ui::{build_cached_state, build_state, OperationStatus, UiState},
 };
@@ -26,21 +30,20 @@ use tao::{
 };
 #[cfg(target_os = "macos")]
 use tray_icon::menu::ContextMenu;
-use tray_icon::menu::{
-    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, MenuItemKind, PredefinedMenuItem,
-};
-use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, MenuItemKind, PredefinedMenuItem};
+use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 use wry::{WebView, WebViewBuilder};
 
 #[derive(Debug, Clone)]
 enum UserEvent {
+    Desktop(DesktopEvent),
+    ShowSettings,
     PreviousReady {
         epoch: u64,
         display: String,
         current: std::result::Result<u16, String>,
     },
     HotKey(u32),
-    TrayActivated,
     PrewarmSettings,
     NativeMenu(MenuEvent),
     Ipc(String),
@@ -53,12 +56,8 @@ enum UserEvent {
     RefreshFinished {
         epoch: u64,
         sequence: u64,
+        config_revision: u64,
         state: Box<UiState>,
-    },
-    CurrentInputsRefreshed {
-        epoch: u64,
-        sequence: u64,
-        values: Vec<(String, Option<u16>)>,
     },
 }
 
@@ -105,30 +104,38 @@ struct WindowBundle {
 }
 
 struct AppState {
+    desktop_hooks: Option<DesktopHooks>,
+    menu_rebuild_pending: bool,
+    display_refresh_due: Option<Instant>,
     shortcuts: Option<Shortcuts>,
     history: InputHistory,
     recording_shortcut: bool,
     refresh_pending: bool,
+    refresh_in_flight: Option<u64>,
     config_path: PathBuf,
     tray_icon: Option<TrayIcon>,
     settings: Option<WindowBundle>,
     ui_state: Option<UiState>,
     native_menu_actions: HashMap<String, NativeMenuAction>,
     native_menu: Option<Menu>,
-    native_input_items: HashMap<String, CheckMenuItem>,
+    native_input_items: HashMap<String, MenuItem>,
     native_menu_signature: Vec<String>,
     epoch: u64,
-    read_sequence: u64,
     full_refresh_sequence: u64,
+    config_revision: u64,
 }
 
 impl AppState {
     fn new(config_path: PathBuf) -> Self {
         Self {
+            desktop_hooks: None,
+            menu_rebuild_pending: false,
+            display_refresh_due: None,
             shortcuts: None,
             history: InputHistory::default(),
             recording_shortcut: false,
             refresh_pending: false,
+            refresh_in_flight: None,
             config_path,
             tray_icon: None,
             settings: None,
@@ -138,8 +145,8 @@ impl AppState {
             native_input_items: HashMap::new(),
             native_menu_signature: Vec::new(),
             epoch: 0,
-            read_sequence: 0,
             full_refresh_sequence: 0,
+            config_revision: 0,
         }
     }
 
@@ -156,7 +163,7 @@ impl AppState {
         let mut state = build_cached_state(&self.config_path);
         match Shortcuts::new() {
             Ok(mut shortcuts) => {
-                state.shortcut_error = shortcuts.replace(&state.shortcuts).err();
+                state.shortcut_error = shortcuts.restore_available(&state.shortcuts).err();
                 self.shortcuts = Some(shortcuts);
             }
             Err(error) => state.shortcut_error = Some(error),
@@ -181,6 +188,14 @@ impl AppState {
 
         let tray_icon = tray_builder.build()?;
         configure_macos_tray_symbol(&tray_icon);
+        let desktop_proxy = proxy.clone();
+        self.desktop_hooks = Some(DesktopHooks::new(
+            &tray_icon,
+            self.native_menu.as_ref().unwrap(),
+            Arc::new(move |event| {
+                let _ = desktop_proxy.send_event(UserEvent::Desktop(event));
+            }),
+        )?);
         self.tray_icon = Some(tray_icon);
 
         self.ui_state = Some(state);
@@ -238,15 +253,11 @@ impl AppState {
 
         match command {
             IpcCommand::RecordShortcut { active } => {
-                self.recording_shortcut = active;
-                if let (Some(shortcuts), Some(state)) = (&mut self.shortcuts, &mut self.ui_state) {
-                    state.shortcut_error = shortcuts
-                        .replace(if active { &[] } else { &state.shortcuts })
-                        .err();
-                }
+                self.set_shortcut_recording(active);
                 self.refresh_settings();
             }
             IpcCommand::CloseSettings => {
+                self.set_shortcut_recording(false);
                 if let Some(settings) = &self.settings {
                     settings.window.set_visible(false);
                 }
@@ -270,6 +281,17 @@ impl AppState {
         }
     }
 
+    fn set_shortcut_recording(&mut self, active: bool) {
+        self.recording_shortcut = active;
+        if let (Some(shortcuts), Some(state)) = (&mut self.shortcuts, &mut self.ui_state) {
+            state.shortcut_error = if active {
+                shortcuts.replace(&[]).err()
+            } else {
+                shortcuts.restore_available(&state.shortcuts).err()
+            };
+        }
+    }
+
     fn switch_previous(&mut self, display: &str, proxy: EventLoopProxy<UserEvent>) {
         let Some(state) = &mut self.ui_state else {
             return;
@@ -285,13 +307,12 @@ impl AppState {
             .find(|monitor| monitor.selector == display)
             .and_then(|monitor| monitor.current_value);
         self.epoch += 1;
-        self.read_sequence += 1;
         let epoch = self.epoch;
         let config_path = self.config_path.clone();
         let display = display.to_owned();
         self.sync_native_input_items();
         thread::spawn(move || {
-            let current = Config::load(&config_path)
+            let current = Config::load_or_default(&config_path)
                 .and_then(|config| {
                     get_input_source(ReadRequest {
                         backend: config.default_backend,
@@ -405,7 +426,6 @@ impl AppState {
             state.operation.message = None;
         }
         self.epoch += 1;
-        self.read_sequence += 1;
         let epoch = self.epoch;
         self.sync_native_input_items();
         self.refresh_settings();
@@ -472,11 +492,7 @@ impl AppState {
         items: Vec<LabelUpdate>,
         bindings: Option<Vec<ShortcutBinding>>,
     ) -> Result<()> {
-        let mut config = match Config::load(&self.config_path) {
-            Ok(config) => config,
-            Err(monitor_switch::error::AppError::ConfigMissing(_)) => Config::default(),
-            Err(error) => return Err(error),
-        };
+        let mut config = Config::load_or_default(&self.config_path)?;
         let old_bindings = config.shortcuts.clone();
         if let Some(bindings) = bindings {
             monitor_switch::shortcuts::validate(&bindings)
@@ -528,7 +544,11 @@ impl AppState {
         }
         if let Err(error) = config.save(&self.config_path) {
             if let Some(shortcuts) = &mut self.shortcuts {
-                let _ = shortcuts.replace(&old_bindings);
+                if let Err(restore_error) = shortcuts.restore_available(&old_bindings) {
+                    if let Some(state) = &mut self.ui_state {
+                        state.shortcut_error = Some(restore_error);
+                    }
+                }
             }
             return Err(error);
         }
@@ -536,6 +556,7 @@ impl AppState {
             state.shortcuts = config.shortcuts;
             state.shortcut_error = None;
         }
+        self.config_revision += 1;
         Ok(())
     }
 
@@ -546,6 +567,14 @@ impl AppState {
 
         let signature = menu_signature(state);
         if signature != self.native_menu_signature {
+            if self
+                .desktop_hooks
+                .as_ref()
+                .is_some_and(DesktopHooks::menu_is_open)
+            {
+                self.menu_rebuild_pending = true;
+                return;
+            }
             let Some(menu) = &self.native_menu else {
                 return;
             };
@@ -557,6 +586,7 @@ impl AppState {
             self.native_input_items = input_items;
             self.native_menu_signature = signature;
         }
+        self.menu_rebuild_pending = false;
         if let Some(menu) = &self.native_menu {
             decorate_native_menu_item(menu, 0, Some(&menu_status_subtitle(state)), None);
         }
@@ -573,10 +603,11 @@ impl AppState {
     }
 
     fn refresh_async(&mut self, proxy: EventLoopProxy<UserEvent>) {
-        if self
-            .ui_state
-            .as_ref()
-            .is_some_and(|state| state.operation.status == OperationStatus::Switching)
+        if self.refresh_in_flight.is_some()
+            || self
+                .ui_state
+                .as_ref()
+                .is_some_and(|state| state.operation.status == OperationStatus::Switching)
         {
             self.refresh_pending = true;
             return;
@@ -584,69 +615,35 @@ impl AppState {
         self.refresh_pending = false;
         self.full_refresh_sequence += 1;
         let sequence = self.full_refresh_sequence;
+        self.refresh_in_flight = Some(sequence);
         let config_path = self.config_path.clone();
         let epoch = self.epoch;
+        let config_revision = self.config_revision;
         thread::spawn(move || {
             let _ = proxy.send_event(UserEvent::RefreshFinished {
                 epoch,
                 sequence,
+                config_revision,
                 state: Box::new(build_state(&config_path)),
             });
         });
     }
 
-    fn refresh_current_inputs_async(&mut self, proxy: EventLoopProxy<UserEvent>, delay_ms: u64) {
-        if self
-            .ui_state
-            .as_ref()
-            .is_some_and(|state| state.operation.status == OperationStatus::Switching)
-        {
+    fn handle_refresh_finished(
+        &mut self,
+        mut state: UiState,
+        epoch: u64,
+        sequence: u64,
+        config_revision: u64,
+    ) {
+        if sequence != self.full_refresh_sequence {
             return;
         }
-        self.read_sequence += 1;
-        let epoch = self.epoch;
-        let sequence = self.read_sequence;
-        let config_path = self.config_path.clone();
-        let displays = self
-            .ui_state
-            .as_ref()
-            .map(|state| {
-                state
-                    .monitors
-                    .iter()
-                    .map(|monitor| monitor.selector.clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        thread::spawn(move || {
-            if delay_ms > 0 {
-                thread::sleep(std::time::Duration::from_millis(delay_ms));
-            }
-            let config = Config::load(&config_path).unwrap_or_default();
-            let values = displays
-                .into_iter()
-                .map(|display| {
-                    let current = get_input_source(ReadRequest {
-                        backend: config.default_backend,
-                        display: (!display.is_empty()).then_some(display.as_str()),
-                    })
-                    .ok();
-                    (display, current)
-                })
-                .collect();
-            let _ = proxy.send_event(UserEvent::CurrentInputsRefreshed {
-                epoch,
-                sequence,
-                values,
-            });
-        });
-    }
-
-    fn handle_refresh_finished(&mut self, mut state: UiState, epoch: u64, sequence: u64) {
-        if epoch != self.epoch || sequence != self.full_refresh_sequence {
+        self.refresh_in_flight = None;
+        if epoch != self.epoch || config_revision != self.config_revision {
+            self.refresh_pending = true;
             return;
         }
-        self.read_sequence += 1;
         for monitor in &state.monitors {
             if monitor.connected {
                 if let Some(value) = monitor.current_value {
@@ -681,32 +678,8 @@ impl AppState {
         self.refresh_settings();
     }
 
-    fn handle_current_inputs_refreshed(
-        &mut self,
-        values: Vec<(String, Option<u16>)>,
-        epoch: u64,
-        sequence: u64,
-    ) {
-        if epoch != self.epoch || sequence != self.read_sequence {
-            return;
-        }
-        let Some(state) = &mut self.ui_state else {
-            return;
-        };
-        for (display, current) in values {
-            if let Some(value) = current {
-                self.history.observe(&display, value);
-            }
-            state.update_current_input(&display, current);
-        }
-        state.previous_inputs = self.history.previous();
-        self.rebuild_native_menu();
-        self.refresh_settings();
-    }
-
     fn sync_native_input_items(&self) {
         for item in self.native_input_items.values() {
-            item.set_checked(false);
             item.set_enabled(true);
         }
         let Some(state) = &self.ui_state else {
@@ -744,14 +717,6 @@ impl AppState {
             for input in &monitor.inputs {
                 let id = format!("input:{monitor_index}:{:02x}", input.value);
                 if let Some(item) = self.native_input_items.get(&id) {
-                    let switching = state.operation.status == OperationStatus::Switching
-                        && state.operation.target_value == Some(input.value)
-                        && state.operation.target_display.as_deref() == Some(&monitor.selector);
-                    item.set_checked(if state.operation.status == OperationStatus::Switching {
-                        switching
-                    } else {
-                        input.current
-                    });
                     item.set_enabled(state.operation.status != OperationStatus::Switching);
                 }
             }
@@ -797,13 +762,6 @@ impl AppState {
         }
         self.rebuild_native_menu();
         self.refresh_settings();
-        if self
-            .ui_state
-            .as_ref()
-            .is_some_and(|state| state.operation.status == OperationStatus::Success)
-        {
-            self.refresh_current_inputs_async(proxy.clone(), 700);
-        }
         if self.refresh_pending {
             self.refresh_async(proxy);
         }
@@ -888,6 +846,17 @@ fn main() {
     let config_path = default_config_path();
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
     let proxy = event_loop.create_proxy();
+    let activation_proxy = proxy.clone();
+    let instance = match Instance::acquire(&config_path, move || {
+        let _ = activation_proxy.send_event(UserEvent::ShowSettings);
+    }) {
+        Ok(Acquisition::Primary(instance)) => instance,
+        Ok(Acquisition::Secondary) => return,
+        Err(error) => {
+            eprintln!("failed to acquire application instance: {error}");
+            return;
+        }
+    };
     let hotkey_proxy = proxy.clone();
     GlobalHotKeyEvent::set_event_handler(Some(move |event: GlobalHotKeyEvent| {
         if event.state == HotKeyState::Released {
@@ -899,19 +868,27 @@ fn main() {
     MenuEvent::set_event_handler(Some(move |event| {
         let _ = menu_proxy.send_event(UserEvent::NativeMenu(event));
     }));
-    let tray_proxy = proxy.clone();
-    TrayIconEvent::set_event_handler(Some(move |event| {
-        if is_tray_activation(&event) {
-            let _ = tray_proxy.send_event(UserEvent::TrayActivated);
-        }
-    }));
 
     let mut state = AppState::new(config_path);
 
     event_loop.run(move |event, target, control_flow| {
+        let _keep_instance_alive = &instance;
         *control_flow = ControlFlow::Wait;
 
         match event {
+            Event::UserEvent(UserEvent::ShowSettings) => {
+                if let Err(error) = state.open_settings(target, proxy.clone()) {
+                    eprintln!("failed to open settings: {error}");
+                }
+            }
+            Event::UserEvent(UserEvent::Desktop(DesktopEvent::MenuClosed)) => {
+                if state.menu_rebuild_pending {
+                    state.rebuild_native_menu();
+                }
+            }
+            Event::UserEvent(UserEvent::Desktop(DesktopEvent::DisplaysChanged)) => {
+                state.display_refresh_due = Some(Instant::now() + Duration::from_millis(700));
+            }
             Event::UserEvent(UserEvent::PreviousReady {
                 epoch,
                 display,
@@ -923,9 +900,6 @@ fn main() {
                     eprintln!("failed to initialize app: {error}");
                     *control_flow = ControlFlow::Exit;
                 }
-            }
-            Event::UserEvent(UserEvent::TrayActivated) => {
-                state.refresh_current_inputs_async(proxy.clone(), 0);
             }
             Event::UserEvent(UserEvent::PrewarmSettings) => {
                 state.prewarm_settings(target, proxy.clone());
@@ -947,16 +921,24 @@ fn main() {
             Event::UserEvent(UserEvent::RefreshFinished {
                 epoch,
                 sequence,
+                config_revision,
                 state: ui_state,
             }) => {
-                state.handle_refresh_finished(*ui_state, epoch, sequence);
+                state.handle_refresh_finished(*ui_state, epoch, sequence, config_revision);
             }
-            Event::UserEvent(UserEvent::CurrentInputsRefreshed {
-                epoch,
-                sequence,
-                values,
-            }) => {
-                state.handle_current_inputs_refreshed(values, epoch, sequence);
+            Event::WindowEvent {
+                event: WindowEvent::Focused(false),
+                window_id,
+                ..
+            } => {
+                if state
+                    .settings
+                    .as_ref()
+                    .is_some_and(|settings| settings.window.id() == window_id)
+                {
+                    state.set_shortcut_recording(false);
+                    state.refresh_settings();
+                }
             }
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested,
@@ -965,18 +947,28 @@ fn main() {
             } => state.handle_close(window_id, control_flow),
             _ => {}
         }
-    });
-}
-
-fn is_tray_activation(event: &TrayIconEvent) -> bool {
-    matches!(
-        event,
-        TrayIconEvent::Click {
-            button: MouseButton::Left | MouseButton::Right,
-            button_state: MouseButtonState::Down,
-            ..
+        if *control_flow != ControlFlow::Exit {
+            if state.refresh_pending
+                && state.refresh_in_flight.is_none()
+                && !state
+                    .ui_state
+                    .as_ref()
+                    .is_some_and(|state| state.operation.status == OperationStatus::Switching)
+            {
+                state.refresh_async(proxy.clone());
+            }
+            if state
+                .display_refresh_due
+                .is_some_and(|due| due <= Instant::now())
+            {
+                state.display_refresh_due = None;
+                state.refresh_async(proxy.clone());
+            }
+            if let Some(due) = state.display_refresh_due {
+                *control_flow = ControlFlow::WaitUntil(due);
+            }
         }
-    )
+    });
 }
 
 #[cfg(target_os = "macos")]
@@ -1045,7 +1037,7 @@ fn build_native_menu(
 ) -> (
     Menu,
     HashMap<String, NativeMenuAction>,
-    HashMap<String, CheckMenuItem>,
+    HashMap<String, MenuItem>,
 ) {
     let menu = Menu::new();
     let (actions, input_items) = populate_native_menu(&menu, state);
@@ -1055,10 +1047,7 @@ fn build_native_menu(
 fn populate_native_menu(
     menu: &Menu,
     state: &UiState,
-) -> (
-    HashMap<String, NativeMenuAction>,
-    HashMap<String, CheckMenuItem>,
-) {
+) -> (HashMap<String, NativeMenuAction>, HashMap<String, MenuItem>) {
     let mut actions = HashMap::new();
     let mut input_items = HashMap::new();
     let status_subtitle = menu_status_subtitle(state);
@@ -1098,18 +1087,10 @@ fn populate_native_menu(
             } else {
                 input.name.clone()
             };
-            let switching = state.operation.status == OperationStatus::Switching
-                && state.operation.target_value == Some(input.value)
-                && state.operation.target_display.as_deref() == Some(&monitor.selector);
-            let item = CheckMenuItem::with_id(
+            let item = MenuItem::with_id(
                 id.clone(),
                 title.replace('&', "&&"),
                 state.operation.status != OperationStatus::Switching,
-                if state.operation.status == OperationStatus::Switching {
-                    switching
-                } else {
-                    input.current
-                },
                 None,
             );
             let _ = menu.append(&item);
@@ -1213,13 +1194,9 @@ fn populate_native_menu(
 }
 
 fn menu_status_subtitle(state: &UiState) -> String {
-    let connected = if state.monitor.connected {
-        "DDC/CI 已连接"
-    } else if state.monitor.current_value.is_some() {
-        "当前输入源待确认"
-    } else {
-        "当前输入源未知"
-    };
+    if let Some(error) = &state.config_error {
+        return error.clone();
+    }
     match state.operation.status {
         OperationStatus::Error => state
             .operation
@@ -1227,7 +1204,8 @@ fn menu_status_subtitle(state: &UiState) -> String {
             .as_deref()
             .unwrap_or("切换失败")
             .to_string(),
-        _ => format!("{} · {connected}", state.monitor.name),
+        OperationStatus::Switching => format!("{} · 正在发送切换命令", state.monitor.name),
+        _ => state.monitor.name.clone(),
     }
 }
 
@@ -1340,7 +1318,19 @@ fn switch_input(
     display: Option<String>,
     profile_name: Option<String>,
 ) -> Result<()> {
-    let config = Config::load(config_path)?;
+    switch_input_with(config_path, value, display, profile_name, |request| {
+        set_input_source(request).map(|_| ())
+    })
+}
+
+fn switch_input_with(
+    config_path: &Path,
+    value: u16,
+    display: Option<String>,
+    profile_name: Option<String>,
+    send: impl FnOnce(SwitchRequest<'_>) -> Result<()>,
+) -> Result<()> {
+    let config = Config::load_or_default(config_path)?;
     let profile = profile_name
         .as_deref()
         .and_then(|name| config.find_profile(name))
@@ -1353,15 +1343,14 @@ fn switch_input(
             })
         });
 
-    set_input_source(SwitchRequest {
+    send(SwitchRequest {
         backend: config.effective_backend(profile),
         display: display
             .as_deref()
             .or_else(|| config.effective_display(profile)),
         value: profile.map_or(value, |profile| profile.value),
         dry_run: false,
-    })?;
-    Ok(())
+    })
 }
 
 #[cfg(target_os = "windows")]
@@ -1423,6 +1412,78 @@ mod tests {
     use monitor_switch::config::Config;
 
     #[test]
+    fn refresh_from_before_save_is_discarded_and_queued_again() {
+        let path = std::path::PathBuf::from("/nonexistent/monitor-switch-test.toml");
+        let stale = monitor_switch::ui::build_cached_state(&path);
+        let mut app = AppState::new(path);
+        app.ui_state = Some(stale.clone());
+        app.config_revision = 1;
+        app.full_refresh_sequence = 1;
+        app.refresh_in_flight = Some(1);
+        app.handle_refresh_finished(stale, 0, 1, 0);
+        assert!(app.refresh_in_flight.is_none());
+        assert!(app.refresh_pending);
+    }
+
+    #[test]
+    fn refresh_interrupted_by_switch_does_not_lose_rediscovery() {
+        let path = std::path::PathBuf::from("/nonexistent/monitor-switch-test.toml");
+        let stale = monitor_switch::ui::build_cached_state(&path);
+        let mut app = AppState::new(path);
+        app.epoch = 1;
+        app.full_refresh_sequence = 1;
+        app.refresh_in_flight = Some(1);
+        app.handle_refresh_finished(stale, 0, 1, 0);
+        assert!(app.refresh_pending);
+        assert!(app.refresh_in_flight.is_none());
+    }
+
+    #[test]
+    fn first_switch_without_configuration_reaches_backend() {
+        let path = std::env::temp_dir().join(format!(
+            "monitor-switch-first-run-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut sent = false;
+        super::switch_input_with(&path, 0x11, Some("display-a".into()), None, |request| {
+            sent = true;
+            assert_eq!(request.value, 0x11);
+            assert_eq!(request.display, Some("display-a"));
+            assert_eq!(request.backend, monitor_switch::config::BackendKind::Auto);
+            assert!(!request.dry_run);
+            Ok(())
+        })
+        .unwrap();
+        assert!(sent);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn malformed_configuration_does_not_send_switch_or_get_overwritten() {
+        let path = std::env::temp_dir().join(format!(
+            "monitor-switch-invalid-{}-{}.toml",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let invalid = "default-backend = [";
+        std::fs::write(&path, invalid).unwrap();
+        let result = super::switch_input_with(&path, 0x11, None, None, |_| {
+            panic!("invalid config must not reach the backend")
+        });
+        assert!(result.is_err());
+        assert!(Config::load_or_default(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), invalid);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn stale_full_refresh_cannot_replace_new_shortcut_settings() {
         let path = std::path::PathBuf::from("/nonexistent/monitor-switch-test.toml");
         let stale = monitor_switch::ui::build_cached_state(&path);
@@ -1437,7 +1498,7 @@ mod tests {
         let mut app = AppState::new(path);
         app.ui_state = Some(current);
         app.full_refresh_sequence = 2;
-        app.handle_refresh_finished(stale, 0, 1);
+        app.handle_refresh_finished(stale, 0, 1, 0);
         assert_eq!(app.ui_state.as_ref().unwrap().shortcuts.len(), 1);
     }
 

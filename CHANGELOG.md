@@ -3,6 +3,29 @@
 All notable changes to Monitor Switch are documented here. The project follows
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.1] - 2026-10-22
+
+### Changed
+
+- Input menu entries are plain actions without current-source checkmarks.
+- Opening the tray menu and completing a switch no longer trigger input-state
+  reads. Previous-input history is retained for the explicit return action.
+
+### Fixed
+
+- Native menu structure changes wait for the menu to close on macOS and Windows.
+- Repeated launches notify the existing process to open Settings instead of
+  creating another tray icon or competing for shortcuts.
+- Display topology changes and wake events trigger debounced, serialized
+  rediscovery without background polling.
+- Configuration writes use a synced temporary file and atomic replacement;
+  loading errors are displayed in Settings instead of silently appearing reset.
+- Shortcut restoration keeps available combinations active when another
+  combination is occupied, including after the recorder loses focus.
+- First-run input switching and previous-input reads now use default settings
+  when no configuration file exists, without requiring a Settings save first
+  (issue #1). Invalid existing configuration files still report errors.
+
 ## [0.4.0] - 2026-09-26
 
 ### Added

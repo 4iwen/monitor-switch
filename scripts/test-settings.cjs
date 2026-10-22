@@ -36,6 +36,18 @@ const { chromium } = require('playwright');
     });
     assert.equal(await page.locator('[data-value]').first().inputValue(), 'Gaming PC');
     assert.equal(await shortcut.getAttribute('data-binding'), 'Control+Alt+Digit1');
+    await page.evaluate(() => {
+      window.__STATE__.config_error = '配置文件无法解析';
+      window.monitorSwitchRender(window.__STATE__);
+    });
+    assert.equal(await page.locator('#config-error').isVisible(), true);
+    assert.equal(await page.locator('#config-error').innerText(), '配置文件无法解析');
+    assert.equal(await page.locator('[data-value]').first().inputValue(), 'Gaming PC');
+    await page.evaluate(() => {
+      window.__STATE__.config_error = null;
+      window.monitorSwitchRender(window.__STATE__);
+    });
+    assert.equal(await page.locator('#config-error').isVisible(), false);
     await page.getByRole('button', { name: '取消', exact: true }).click();
     assert.equal(await page.locator('#discard-dialog').isVisible(), true);
     await page.getByRole('button', { name: '放弃修改', exact: true }).click();

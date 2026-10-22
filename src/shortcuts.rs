@@ -70,6 +70,23 @@ impl Shortcuts {
         })
     }
 
+    pub fn restore_available(&mut self, bindings: &[ShortcutBinding]) -> Result<(), String> {
+        restore_with(
+            &mut self.registered,
+            bindings,
+            |hotkey| {
+                self.manager
+                    .register(hotkey)
+                    .map_err(|error| error.to_string())
+            },
+            |hotkey| {
+                self.manager
+                    .unregister(hotkey)
+                    .map_err(|error| error.to_string())
+            },
+        )
+    }
+
     pub fn action(&self, id: u32) -> Option<ShortcutBinding> {
         self.registered.get(&id).map(|(_, binding)| binding.clone())
     }
@@ -102,9 +119,87 @@ impl Shortcuts {
     }
 }
 
+fn restore_with(
+    registered: &mut HashMap<u32, (HotKey, ShortcutBinding)>,
+    bindings: &[ShortcutBinding],
+    mut register: impl FnMut(HotKey) -> Result<(), String>,
+    mut unregister: impl FnMut(HotKey) -> Result<(), String>,
+) -> Result<(), String> {
+    let next = validate(bindings)?;
+    let mut failures = Vec::new();
+    for (id, (hotkey, binding)) in &next {
+        if let Some(existing) = registered.get_mut(id) {
+            existing.1 = binding.clone();
+            continue;
+        }
+        match register(*hotkey) {
+            Ok(()) => {
+                registered.insert(*id, (*hotkey, binding.clone()));
+            }
+            Err(error) => failures.push(format!("{}：{error}", label(&binding.shortcut))),
+        }
+    }
+    let removed = registered
+        .keys()
+        .filter(|id| !next.contains_key(id))
+        .copied()
+        .collect::<Vec<_>>();
+    for id in removed {
+        match unregister(registered[&id].0) {
+            Ok(()) => {
+                registered.remove(&id);
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "部分快捷键不可用，其他快捷键仍有效：{}",
+            failures.join("；")
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn restore_keeps_available_keys_and_can_retry_conflicts() {
+        let bindings = [
+            ShortcutBinding {
+                display: "a".into(),
+                value: Some(17),
+                shortcut: "Control+Alt+Digit1".into(),
+            },
+            ShortcutBinding {
+                display: "a".into(),
+                value: Some(18),
+                shortcut: "Control+Alt+Digit2".into(),
+            },
+        ];
+        let blocked = bindings[0].shortcut.parse::<HotKey>().unwrap().id();
+        let working = bindings[1].shortcut.parse::<HotKey>().unwrap().id();
+        let mut registered = HashMap::new();
+        let result = restore_with(
+            &mut registered,
+            &bindings,
+            |hotkey| {
+                if hotkey.id() == blocked {
+                    Err("occupied".into())
+                } else {
+                    Ok(())
+                }
+            },
+            |_| panic!("must not roll back working shortcuts"),
+        );
+        assert!(result.unwrap_err().contains("Ctrl+Alt+1"));
+        assert!(registered.contains_key(&working));
+        assert!(!registered.contains_key(&blocked));
+        restore_with(&mut registered, &bindings, |_| Ok(()), |_| Ok(())).unwrap();
+        assert_eq!(registered.len(), 2);
+    }
     #[test]
     fn rejects_duplicate_combinations_and_plain_keys() {
         let binding = ShortcutBinding {

@@ -4,9 +4,10 @@ A lightweight macOS and Windows utility for switching monitor inputs from the
 menu bar or system tray. It sends DDC/CI VCP `0x60` commands directly, so normal
 use does not require BetterDisplay, ddcctl, ddcutil, or ControlMyMonitor.
 
-Monitor Switch is deliberately small and user initiated: it does nothing until
-you choose an input or press a configured shortcut. There is no USB listener, cloud service,
-account, analytics, or background polling.
+Monitor Switch is deliberately small: inputs switch only when you choose an
+input or press a configured shortcut. Display discovery updates on connection
+and wake events. There is no USB listener, cloud service, account, analytics,
+or background polling.
 
 ## Features
 
@@ -17,11 +18,13 @@ account, analytics, or background polling.
 - Independent previous-input history for each display
 - Multiple monitors with independent input names
 - Per-input control over which sources appear in the tray menu
-- Automatic current-input checkmark when the display supports reading VCP `0x60`
+- Input commands without an inferred current-source checkmark
 - CLI for discovery, diagnostics, and scripts
 - Compatibility backends for unusual monitor, dock, and GPU combinations
 - Starts at login on macOS after installation
 - Optional per-user startup shortcut on Windows
+- Single-instance startup: opening the app again shows the existing Settings
+- Display rediscovery after connection changes and wake
 
 ## Requirements
 

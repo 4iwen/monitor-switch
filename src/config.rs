@@ -1,5 +1,6 @@
 use std::{
     env, fs,
+    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -99,22 +100,43 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Err(AppError::ConfigMissing(path.display().to_string()));
+    pub fn load_or_default(path: &Path) -> Result<Self> {
+        match Self::load(path) {
+            Ok(config) => Ok(config),
+            Err(AppError::ConfigMissing(_)) => Ok(Self::default()),
+            Err(error) => Err(error),
         }
+    }
 
-        let raw = fs::read_to_string(path)?;
+    pub fn load(path: &Path) -> Result<Self> {
+        let raw = match fs::read_to_string(path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AppError::ConfigMissing(path.display().to_string()));
+            }
+            Err(error) => return Err(error.into()),
+        };
         Ok(toml::from_str(&raw)?)
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::create_dir_all(parent)?;
         let raw = toml::to_string_pretty(self)?;
-        fs::write(path, raw)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+        if let Ok(metadata) = fs::metadata(path) {
+            temporary
+                .as_file()
+                .set_permissions(metadata.permissions())?;
+        }
+        temporary.write_all(raw.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(path)
+            .map_err(|error| AppError::Io(error.error))?;
         Ok(())
     }
 
@@ -206,6 +228,63 @@ fn home_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::{BackendKind, Config, SourceProfile};
+
+    #[test]
+    fn atomic_save_never_exposes_partial_config_and_cleans_temporary_files() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        Config::default().save(&path).unwrap();
+        let running = Arc::new(AtomicBool::new(true));
+        let reader_running = running.clone();
+        let reader_path = path.clone();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let reader_barrier = barrier.clone();
+        let reader = std::thread::spawn(move || {
+            Config::load(&reader_path).unwrap();
+            let mut reads = 1;
+            reader_barrier.wait();
+            while reader_running.load(Ordering::Acquire) {
+                let config = Config::load(&reader_path).unwrap();
+                assert!(config.schema_version == 2);
+                reads += 1;
+            }
+            reads
+        });
+        barrier.wait();
+        for index in 0..25 {
+            Config {
+                default_display: Some(format!("display-{index}")),
+                ..Config::default()
+            }
+            .save(&path)
+            .unwrap();
+        }
+        running.store(false, Ordering::Release);
+        assert!(reader.join().unwrap() > 0);
+        assert_eq!(
+            Config::load(&path).unwrap().default_display.as_deref(),
+            Some("display-24")
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn failed_atomic_replace_keeps_existing_destination() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("existing-directory");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::write(destination.join("keep"), "original").unwrap();
+        assert!(Config::default().save(&destination).is_err());
+        assert_eq!(
+            std::fs::read_to_string(destination.join("keep")).unwrap(),
+            "original"
+        );
+        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+    }
 
     #[test]
     fn profile_backend_overrides_default_backend() {

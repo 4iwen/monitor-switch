@@ -42,12 +42,14 @@ pub fn settings_html(state: &UiState) -> String {
     ]).flat().join('|');
 
     function updateLiveState(state) {{
+      const configError = document.getElementById('config-error');
+      if (configError) {{ configError.textContent = state.config_error || ''; configError.hidden = !state.config_error; }}
       const error = document.getElementById('shortcut-error');
       if (error) {{ error.textContent = state.shortcut_error || ''; error.hidden = !state.shortcut_error; }}
       state.monitors.forEach((monitor, monitorIndex) => {{
         const status = document.querySelector(`[data-display-state="${{monitorIndex}}"]`);
         if (!status) return;
-        status.innerHTML = `<i class="connection ${{monitor.connected ? 'online' : ''}}"></i>${{monitor.connected ? 'DDC/CI 已连接' : monitor.current_value == null ? '当前输入源未知' : '当前输入源待确认'}}`;
+        status.textContent = `${{monitor.available_inputs.filter(input => input.show_in_menu).length}} 个菜单输入源`;
       }});
       if (isDirty) return;
       shortcutFields().forEach(field => {{
@@ -104,7 +106,7 @@ pub fn settings_html(state: &UiState) -> String {
           <section class="display-panel ${{monitorIndex === activeMonitor ? 'active' : ''}}" data-monitor-panel="${{monitorIndex}}" id="monitor-panel-${{monitorIndex}}" role="tabpanel" aria-labelledby="monitor-tab-${{monitorIndex}}">
             <header class="display-heading">
               <span><strong>${{escapeHtml(monitor.name)}}</strong><small>${{escapeHtml(monitor.subtitle)}}</small></span>
-              <span class="display-state" data-display-state="${{monitorIndex}}"><i class="connection ${{monitor.connected ? 'online' : ''}}"></i>${{monitor.connected ? 'DDC/CI 已连接' : monitor.current_value == null ? '当前输入源未知' : '当前输入源待确认'}}</span>
+              <span class="display-state" data-display-state="${{monitorIndex}}">${{monitor.available_inputs.filter(input => input.show_in_menu).length}} 个菜单输入源</span>
             </header>
             <div class="previous-shortcut"><span>切回上一个输入源</span>${{shortcutControl(state, monitor, null)}}</div>
             <div class="column-heading"><span>输入源</span><span>菜单名称</span><span>显示</span></div>
@@ -120,6 +122,7 @@ pub fn settings_html(state: &UiState) -> String {
           </header>
           <div class="settings-scroll">${{displays || '<div class="empty">尚未检测到可配置的显示器</div>'}}</div>
           <div id="shortcut-error" class="shortcut-error" role="alert" ${{state.shortcut_error ? '' : 'hidden'}}>${{escapeHtml(state.shortcut_error || '')}}</div>
+          <div id="config-error" class="shortcut-error" role="alert" ${{state.config_error ? '' : 'hidden'}}>${{escapeHtml(state.config_error || '')}}</div>
           <footer>
             <span class="backend-status">${{escapeHtml(state.backend)}}</span>
             <div class="actions">
@@ -397,6 +400,7 @@ mod tests {
             available_inputs: vec![configured.clone(), candidate.clone()],
         };
         UiState {
+            config_error: None,
             shortcuts: Vec::new(),
             shortcut_error: None,
             previous_inputs: std::collections::HashMap::new(),
