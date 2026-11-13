@@ -18,16 +18,11 @@ try {
     Copy-Item "README.md" $InstallDir -Force
     Copy-Item "LICENSE" $InstallDir -Force
 
-    $Shell = New-Object -ComObject WScript.Shell
-    $Shortcut = $Shell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = $AppPath
-    $Shortcut.WorkingDirectory = $InstallDir
-    $Shortcut.Description = "Monitor Switch"
-    $Shortcut.Save()
+    # Remove any Startup shortcut left by older installs; the app does not start at login.
+    Remove-Item $ShortcutPath -Force -ErrorAction SilentlyContinue
 
-    Start-Process $AppPath
     Write-Output "Monitor Switch installed to $InstallDir"
-    Write-Output "Startup shortcut created at $ShortcutPath"
+    Write-Output "Open it from the Start menu or run Monitor Switch.exe. It does not start at login."
 }
 finally {
     Pop-Location

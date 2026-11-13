@@ -94,6 +94,8 @@ enum IpcCommand {
         #[serde(default)]
         shortcuts: Option<Vec<ShortcutBinding>>,
     },
+    #[serde(rename = "setLaunchAtLogin")]
+    SetLaunchAtLogin { enabled: bool },
     #[serde(rename = "recordShortcut")]
     RecordShortcut { active: bool },
 }
@@ -254,6 +256,16 @@ impl AppState {
         match command {
             IpcCommand::RecordShortcut { active } => {
                 self.set_shortcut_recording(active);
+                self.refresh_settings();
+            }
+            IpcCommand::SetLaunchAtLogin { enabled } => {
+                if let Err(error) = monitor_switch::autostart::set_enabled(enabled) {
+                    eprintln!("cannot change launch at login: {error}");
+                }
+                let actual = monitor_switch::autostart::is_enabled();
+                if let Some(state) = &mut self.ui_state {
+                    state.launch_at_login = actual;
+                }
                 self.refresh_settings();
             }
             IpcCommand::CloseSettings => {

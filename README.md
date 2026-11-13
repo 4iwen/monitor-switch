@@ -22,7 +22,6 @@ or background polling.
 - CLI for discovery, diagnostics, and scripts
 - Compatibility backends for unusual monitor, dock, and GPU combinations
 - Starts at login on macOS after installation
-- Optional per-user startup shortcut on Windows
 - Single-instance startup: opening the app again shows the existing Settings
 - Display rediscovery after connection changes and wake
 
@@ -43,9 +42,8 @@ Until signed release artifacts are published, build and install locally:
 ./scripts/install-macos-app.sh
 ```
 
-This installs `Monitor Switch.app` in `~/Applications`, registers a per-user
-login item, and starts it without a Terminal window. Open it later from Finder,
-Launchpad, or Spotlight like any other application.
+This installs `Monitor Switch.app` in `~/Applications`. It does not start at
+login; open it from Finder, Launchpad, or Spotlight when you need it.
 
 Build without installing:
 
@@ -62,9 +60,8 @@ On Windows 10/11, open PowerShell in the repository and run:
 powershell -ExecutionPolicy Bypass -File .\scripts\install-windows.ps1
 ```
 
-This installs the app in `%LOCALAPPDATA%\Programs\Monitor Switch`, creates a
-per-user Startup shortcut, and opens it directly in the system tray without a
-console window. The settings window uses the Windows WebView2 runtime included
+This installs the app in `%LOCALAPPDATA%\Programs\Monitor Switch`, and does
+not start at login; launch `Monitor Switch.exe` when you need it. The settings window uses the Windows WebView2 runtime included
 with current Windows 10 and Windows 11 installations.
 
 Build a portable ZIP without installing:
@@ -76,6 +73,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-windows.ps1
 The archive is written to `dist\Monitor-Switch-Windows.zip` and contains one
 user-facing executable, `Monitor Switch.exe`. The diagnostic CLI remains
 available to developers through Cargo but is not included in the user package.
+
+## Launch at login
+
+Monitor Switch never starts at login by default. To opt in, open Settings and tick
+**Launch at login**; untick it to turn it off again. Installers do not change this.
 
 ## First setup
 

@@ -14,6 +14,7 @@ use crate::{
 #[derive(Debug, Clone, Serialize)]
 pub struct UiState {
     pub config_error: Option<String>,
+    pub launch_at_login: bool,
     pub shortcuts: Vec<crate::shortcuts::ShortcutBinding>,
     pub shortcut_error: Option<String>,
     pub previous_inputs: std::collections::HashMap<String, u16>,
@@ -167,6 +168,7 @@ fn assemble_state(config_path: &Path, config: Config, monitors: Vec<MonitorView>
 
     UiState {
         config_error: None,
+        launch_at_login: crate::autostart::is_enabled(),
         shortcuts: config.shortcuts.clone(),
         shortcut_error: None,
         previous_inputs: std::collections::HashMap::new(),

@@ -1,4 +1,5 @@
 pub mod app_html;
+pub mod autostart;
 pub mod backends;
 pub mod config;
 pub mod desktop;
