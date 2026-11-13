@@ -37,20 +37,20 @@ const { chromium } = require('playwright');
     assert.equal(await page.locator('[data-value]').first().inputValue(), 'Gaming PC');
     assert.equal(await shortcut.getAttribute('data-binding'), 'Control+Alt+Digit1');
     await page.evaluate(() => {
-      window.__STATE__.config_error = '配置文件无法解析';
+      window.__STATE__.config_error = 'Config file could not be parsed';
       window.monitorSwitchRender(window.__STATE__);
     });
     assert.equal(await page.locator('#config-error').isVisible(), true);
-    assert.equal(await page.locator('#config-error').innerText(), '配置文件无法解析');
+    assert.equal(await page.locator('#config-error').innerText(), 'Config file could not be parsed');
     assert.equal(await page.locator('[data-value]').first().inputValue(), 'Gaming PC');
     await page.evaluate(() => {
       window.__STATE__.config_error = null;
       window.monitorSwitchRender(window.__STATE__);
     });
     assert.equal(await page.locator('#config-error').isVisible(), false);
-    await page.getByRole('button', { name: '取消', exact: true }).click();
+    await page.getByRole('button', { name: 'Cancel', exact: true }).click();
     assert.equal(await page.locator('#discard-dialog').isVisible(), true);
-    await page.getByRole('button', { name: '放弃修改', exact: true }).click();
+    await page.getByRole('button', { name: 'Discard changes', exact: true }).click();
     assert.equal(await page.locator('#save-button').isDisabled(), true);
 
     await page.locator('.clear-shortcut').first().click();
@@ -59,9 +59,9 @@ const { chromium } = require('playwright');
     await page.locator('#save-button').click();
     const cleared = await page.evaluate(() => window.messages.filter(message => message.type === 'saveLabels').at(-1));
     assert.deepEqual(cleared.shortcuts, []);
-    await page.evaluate(() => window.monitorSwitchSaveError('快捷键已被占用'));
+    await page.evaluate(() => window.monitorSwitchSaveError('Shortcut is already in use'));
     assert.equal(await page.locator('#save-button').isEnabled(), true);
-    assert.equal(await page.locator('#notice').innerText(), '快捷键已被占用');
+    assert.equal(await page.locator('#notice').innerText(), 'Shortcut is already in use');
 
     const output = process.argv[3] || '/tmp/monitor-switch-ui';
     mkdirSync(output, { recursive: true });

@@ -272,7 +272,7 @@ impl AppState {
                 }
                 Err(error) => {
                     let message = serde_json::to_string(&error.to_string())
-                        .unwrap_or_else(|_| "\"保存失败\"".to_string());
+                        .unwrap_or_else(|_| "\"Save failed\"".to_string());
                     self.evaluate_settings(&format!(
                             "window.monitorSwitchSaveError && window.monitorSwitchSaveError({message});"
                         ));
@@ -351,11 +351,11 @@ impl AppState {
                     self.begin_switch(Some(previous), Some(display), None, proxy);
                     return;
                 }
-                "还没有可返回的输入源，请先完成一次切换".to_owned()
+                "No previous input to return to yet, switch once first".to_owned()
             }
             Err(error) => {
                 state.update_current_input(&display, None);
-                format!("无法确认当前输入源，未执行切回：{error}")
+                format!("Cannot confirm the current input, switch back not performed: {error}")
             }
         };
         state.operation.status = OperationStatus::Error;
@@ -539,7 +539,7 @@ impl AppState {
                 .map_err(monitor_switch::error::AppError::Shortcut)?;
         } else if !config.shortcuts.is_empty() {
             return Err(monitor_switch::error::AppError::Shortcut(
-                "系统快捷键服务不可用".into(),
+                "System shortcut service unavailable".into(),
             ));
         }
         if let Err(error) = config.save(&self.config_path) {
@@ -785,7 +785,7 @@ fn menu_signature(state: &UiState) -> Vec<String> {
     let operation = if state.operation.status == OperationStatus::Error {
         format!(
             "error:{}",
-            state.operation.message.as_deref().unwrap_or("切换失败")
+            state.operation.message.as_deref().unwrap_or("Switch failed")
         )
     } else {
         "ready".to_string()
@@ -1134,9 +1134,9 @@ fn populate_native_menu(
                     .find(|input| input.value == *value)
                     .map(|input| input.name.clone())
                     .unwrap_or_else(|| monitor_switch::ui::physical_name(*value).to_owned());
-                format!("切回 {name}")
+                format!("Switch back to {name}")
             })
-            .unwrap_or_else(|| "切回上一个输入源".into());
+            .unwrap_or_else(|| "Switch back to previous input".into());
         let previous_id = format!("previous:{monitor_index}");
         let shortcut = state
             .shortcuts
@@ -1175,18 +1175,18 @@ fn populate_native_menu(
     }
 
     let _ = menu.append(&PredefinedMenuItem::separator());
-    let refresh = MenuItem::with_id("refresh", "刷新", true, None);
+    let refresh = MenuItem::with_id("refresh", "Refresh", true, None);
     let _ = menu.append(&refresh);
     decorate_native_menu_item(menu, menu.items().len() - 1, None, Some("arrow.clockwise"));
     actions.insert("refresh".to_string(), NativeMenuAction::Refresh);
 
-    let settings = MenuItem::with_id("settings", "设置…", true, None);
+    let settings = MenuItem::with_id("settings", "Settings…", true, None);
     let _ = menu.append(&settings);
     decorate_native_menu_item(menu, menu.items().len() - 1, None, Some("gearshape"));
     actions.insert("settings".to_string(), NativeMenuAction::OpenSettings);
 
     let _ = menu.append(&PredefinedMenuItem::separator());
-    let quit = MenuItem::with_id("quit", "退出 Monitor Switch", true, None);
+    let quit = MenuItem::with_id("quit", "Quit Monitor Switch", true, None);
     let _ = menu.append(&quit);
     actions.insert("quit".to_string(), NativeMenuAction::Quit);
 
@@ -1202,9 +1202,9 @@ fn menu_status_subtitle(state: &UiState) -> String {
             .operation
             .message
             .as_deref()
-            .unwrap_or("切换失败")
+            .unwrap_or("Switch failed")
             .to_string(),
-        OperationStatus::Switching => format!("{} · 正在发送切换命令", state.monitor.name),
+        OperationStatus::Switching => format!("{} · Sending switch command", state.monitor.name),
         _ => state.monitor.name.clone(),
     }
 }

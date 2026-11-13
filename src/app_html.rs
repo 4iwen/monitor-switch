@@ -4,7 +4,7 @@ pub fn settings_html(state: &UiState) -> String {
     let state_json = serde_json::to_string(state).unwrap_or_else(|_| "{}".to_string());
     format!(
         r#"<!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -26,7 +26,7 @@ pub fn settings_html(state: &UiState) -> String {
     const shortcutFor = (state, display, value) => state.shortcuts.find(binding => binding.display === display && binding.value === value)?.shortcut || '';
     function shortcutControl(state, monitor, value) {{
       const binding = shortcutFor(state, monitor.selector, value);
-      return `<span class="shortcut-control"><input readonly data-shortcut data-display="${{escapeHtml(monitor.selector)}}" data-source="${{value ?? ''}}" data-binding="${{escapeHtml(binding)}}" data-default-binding="${{escapeHtml(binding)}}" value="${{escapeHtml(shortcutLabel(binding))}}" placeholder="快捷键未设置" aria-label="${{escapeHtml(monitor.name)}} ${{value == null ? '切回上一个输入源' : escapeHtml(monitor.available_inputs.find(input => input.value === value)?.subtitle || value)}} 快捷键"><button type="button" class="clear-shortcut" aria-label="清除快捷键" title="清除快捷键" onclick="clearShortcut(this)">×</button></span>`;
+      return `<span class="shortcut-control"><input readonly data-shortcut data-display="${{escapeHtml(monitor.selector)}}" data-source="${{value ?? ''}}" data-binding="${{escapeHtml(binding)}}" data-default-binding="${{escapeHtml(binding)}}" value="${{escapeHtml(shortcutLabel(binding))}}" placeholder="No shortcut set" aria-label="${{escapeHtml(monitor.name)}} ${{value == null ? 'Switch back to previous input' : escapeHtml(monitor.available_inputs.find(input => input.value === value)?.subtitle || value)}} shortcut"><button type="button" class="clear-shortcut" aria-label="Clear shortcut" title="Clear shortcut" onclick="clearShortcut(this)">×</button></span>`;
     }}
 
     const rowKey = row => `${{row.querySelector('[data-value]').dataset.display}}:${{row.querySelector('[data-value]').dataset.value}}`;
@@ -49,7 +49,7 @@ pub fn settings_html(state: &UiState) -> String {
       state.monitors.forEach((monitor, monitorIndex) => {{
         const status = document.querySelector(`[data-display-state="${{monitorIndex}}"]`);
         if (!status) return;
-        status.textContent = `${{monitor.available_inputs.filter(input => input.show_in_menu).length}} 个菜单输入源`;
+        status.textContent = `${{monitor.available_inputs.filter(input => input.show_in_menu).length}}  menu inputs`;
       }});
       if (isDirty) return;
       shortcutFields().forEach(field => {{
@@ -94,11 +94,11 @@ pub fn settings_html(state: &UiState) -> String {
               <span class="port-icon">${{icon(input.icon)}}</span>
               <span class="physical-source">
                 <strong>${{escapeHtml(input.subtitle)}}</strong>
-                <small>${{escapeHtml(input.hex)}} · ${{input.reported_supported ? '显示器报告支持' : '通用候选'}}</small>
+                <small>${{escapeHtml(input.hex)}} · ${{input.reported_supported ? 'Reported by monitor' : 'Generic candidate'}}</small>
               </span>
-              <div class="input-editor"><input class="name-field" data-value="${{input.value}}" data-display="${{escapeHtml(monitor.selector)}}" data-display-index="${{monitorIndex}}" data-default="${{escapeHtml(input.name)}}" value="${{escapeHtml(input.name)}}" maxlength="48" aria-label="${{escapeHtml(input.subtitle)}} 的显示名称">${{shortcutControl(state, monitor, input.value)}}</div>
-              <label class="menu-toggle" title="显示在状态栏菜单">
-                <input type="checkbox" data-visibility data-default-visible="${{input.show_in_menu}}" ${{input.show_in_menu ? 'checked' : ''}} aria-label="在菜单中显示 ${{escapeHtml(input.subtitle)}}">
+              <div class="input-editor"><input class="name-field" data-value="${{input.value}}" data-display="${{escapeHtml(monitor.selector)}}" data-display-index="${{monitorIndex}}" data-default="${{escapeHtml(input.name)}}" value="${{escapeHtml(input.name)}}" maxlength="48" aria-label="${{escapeHtml(input.subtitle)}}display name for ">${{shortcutControl(state, monitor, input.value)}}</div>
+              <label class="menu-toggle" title="Show in menu bar">
+                <input type="checkbox" data-visibility data-default-visible="${{input.show_in_menu}}" ${{input.show_in_menu ? 'checked' : ''}} aria-label="Show in menu: ${{escapeHtml(input.subtitle)}}">
                 <span class="toggle-track"><span></span></span>
               </label>
             </div>`).join('');
@@ -106,10 +106,10 @@ pub fn settings_html(state: &UiState) -> String {
           <section class="display-panel ${{monitorIndex === activeMonitor ? 'active' : ''}}" data-monitor-panel="${{monitorIndex}}" id="monitor-panel-${{monitorIndex}}" role="tabpanel" aria-labelledby="monitor-tab-${{monitorIndex}}">
             <header class="display-heading">
               <span><strong>${{escapeHtml(monitor.name)}}</strong><small>${{escapeHtml(monitor.subtitle)}}</small></span>
-              <span class="display-state" data-display-state="${{monitorIndex}}">${{monitor.available_inputs.filter(input => input.show_in_menu).length}} 个菜单输入源</span>
+              <span class="display-state" data-display-state="${{monitorIndex}}">${{monitor.available_inputs.filter(input => input.show_in_menu).length}}  menu inputs</span>
             </header>
-            <div class="previous-shortcut"><span>切回上一个输入源</span>${{shortcutControl(state, monitor, null)}}</div>
-            <div class="column-heading"><span>输入源</span><span>菜单名称</span><span>显示</span></div>
+            <div class="previous-shortcut"><span>Switch back to previous input</span>${{shortcutControl(state, monitor, null)}}</div>
+            <div class="column-heading"><span>Input</span><span>Menu name</span><span>Show</span></div>
             <div class="input-list">${{rows}}</div>
           </section>`;
       }}).join('');
@@ -117,25 +117,25 @@ pub fn settings_html(state: &UiState) -> String {
       app.innerHTML = `
         <section class="settings-page">
           <header class="settings-header">
-            <h1>显示器输入源</h1>
+            <h1>Monitor Inputs</h1>
             <div class="monitor-tabs" role="tablist">${{monitorTabs}}</div>
           </header>
-          <div class="settings-scroll">${{displays || '<div class="empty">尚未检测到可配置的显示器</div>'}}</div>
+          <div class="settings-scroll">${{displays || '<div class="empty">No configurable monitors detected yet</div>'}}</div>
           <div id="shortcut-error" class="shortcut-error" role="alert" ${{state.shortcut_error ? '' : 'hidden'}}>${{escapeHtml(state.shortcut_error || '')}}</div>
           <div id="config-error" class="shortcut-error" role="alert" ${{state.config_error ? '' : 'hidden'}}>${{escapeHtml(state.config_error || '')}}</div>
           <footer>
             <span class="backend-status">${{escapeHtml(state.backend)}}</span>
             <div class="actions">
-              <div id="notice" class="notice" role="status">${{icon('checkCircle')}}<span>已保存</span></div>
-              <button onclick="requestClose()">取消</button>
-              <button id="save-button" class="primary" onclick="saveLabels()" disabled>保存</button>
+              <div id="notice" class="notice" role="status">${{icon('checkCircle')}}<span>Saved</span></div>
+              <button onclick="requestClose()">Cancel</button>
+              <button id="save-button" class="primary" onclick="saveLabels()" disabled>Save</button>
             </div>
           </footer>
         </section>
         <dialog id="discard-dialog" aria-labelledby="discard-title">
-          <h2 id="discard-title">放弃未保存的修改？</h2>
-          <p>输入源名称、快捷键和菜单显示设置尚未保存。</p>
-          <div class="dialog-actions"><button onclick="document.getElementById('discard-dialog').close()">继续编辑</button><button class="destructive" onclick="discardAndClose()">放弃修改</button></div>
+          <h2 id="discard-title">Discard unsaved changes?</h2>
+          <p>Input names, shortcuts and menu visibility settings have not been saved.</p>
+          <div class="dialog-actions"><button onclick="document.getElementById('discard-dialog').close()">Keep editing</button><button class="destructive" onclick="discardAndClose()">Discard changes</button></div>
         </dialog>`;
       app.dataset.structureKey = key;
       document.querySelectorAll('[data-input-row]').forEach(row => {{
@@ -194,7 +194,7 @@ pub fn settings_html(state: &UiState) -> String {
       isSaving = true;
       updateDirtyState();
       const button = document.getElementById('save-button');
-      button.textContent = '保存中…';
+      button.textContent = 'Saving…';
       const displayed = new Set(window.__STATE__.monitors.map(monitor => monitor.selector));
       const shortcuts = window.__STATE__.shortcuts.filter(binding => !displayed.has(binding.display));
       shortcutFields().filter(field => field.dataset.binding).forEach(field => shortcuts.push({{
@@ -241,11 +241,11 @@ pub fn settings_html(state: &UiState) -> String {
     window.monitorSwitchSaved = () => {{
       isSaving = false;
       const button = document.getElementById('save-button');
-      if (button) button.textContent = '保存';
+      if (button) button.textContent = 'Save';
       const notice = document.getElementById('notice');
       if (!notice) return;
       notice.classList.remove('failed');
-      notice.querySelector('span').textContent = '已保存';
+      notice.querySelector('span').textContent = 'Saved';
       notice.classList.add('visible');
       document.querySelectorAll('input[data-value]').forEach(input => input.dataset.default = input.value.trim());
       document.querySelectorAll('[data-visibility]').forEach(input => input.dataset.defaultVisible = String(input.checked));
@@ -256,7 +256,7 @@ pub fn settings_html(state: &UiState) -> String {
     window.monitorSwitchSaveError = message => {{
       isSaving = false;
       const button = document.getElementById('save-button');
-      if (button) button.textContent = '保存';
+      if (button) button.textContent = 'Save';
       const notice = document.getElementById('notice');
       if (notice) {{ notice.classList.add('visible', 'failed'); notice.querySelector('span').textContent = message; }}
       updateDirtyState();
@@ -428,11 +428,11 @@ mod tests {
         assert!(html.contains("HDMI 2"));
         assert!(html.contains("saveLabels"));
         assert!(html.contains("data-visibility"));
-        assert!(html.contains("通用候选"));
+        assert!(html.contains("Generic candidate"));
         assert!(html.contains("structureKey"));
         assert!(html.contains("updateLiveState"));
-        assert!(!html.contains("配置 ID"));
-        assert!(html.contains("菜单名称</span>"));
+        assert!(!html.contains("Config ID"));
+        assert!(html.contains("Menu name</span>"));
         assert!(!html.contains("animation:panel-in"));
     }
 }

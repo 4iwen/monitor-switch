@@ -105,7 +105,7 @@ Use the clear button or Delete/Backspace to remove a binding. No shortcuts are
 assigned by default. Duplicates and system registration conflicts are reported
 without replacing the existing saved bindings.
 
-The menu's **切回** action uses per-display history from successful reads and
+The menu's **Switch back** action uses per-display history from successful reads and
 accepted switch commands. History lasts for the current app session; a command
 being accepted is not a guarantee that the monitor physically switched. Before
 returning, the app reads the current input again; if that read fails, it does not

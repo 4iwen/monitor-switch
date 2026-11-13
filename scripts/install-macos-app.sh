@@ -43,5 +43,5 @@ rm -f "$LAUNCH_AGENTS_DIR/com.hailong.monitor-switch.plist"
 launchctl bootstrap "$DOMAIN" "$PLIST_PATH"
 launchctl kickstart -k "$DOMAIN"/app.monitorswitch.desktop
 
-printf 'Monitor Switch 已安装到：%s\n' "$INSTALLED_APP"
-printf '已启用登录启动，并在状态栏中运行。\n'
+printf 'Monitor Switch installed to: %s\n' "$INSTALLED_APP"
+printf 'Launch at login enabled; running in the menu bar.\n'

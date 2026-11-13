@@ -157,7 +157,7 @@ fn load_ui_config(path: &Path) -> (Config, Option<String>) {
         Ok(config) => (config, None),
         Err(error) => (
             Config::default(),
-            Some(format!("无法加载配置 {}：{error}", path.display())),
+            Some(format!("Cannot load config {}：{error}", path.display())),
         ),
     }
 }
@@ -487,7 +487,7 @@ mod tests {
             .config_error
             .as_deref()
             .unwrap()
-            .contains("无法加载配置"));
+            .contains("Cannot load config"));
         assert_eq!(std::fs::read_to_string(path).unwrap(), "profiles = [");
     }
 

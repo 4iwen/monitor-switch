@@ -37,21 +37,21 @@ pub fn validate(
         let hotkey: HotKey = binding
             .shortcut
             .parse()
-            .map_err(|error| format!("快捷键 {} 无效：{error}", binding.shortcut))?;
+            .map_err(|error| format!("Shortcut {} is invalid: {error}", binding.shortcut))?;
         if !hotkey
             .mods
             .intersects(Modifiers::CONTROL | Modifiers::ALT | Modifiers::SUPER)
         {
-            return Err("快捷键必须包含 Control、Alt/Option 或 Command/Win 修饰键".into());
+            return Err("Shortcut must include a Control, Alt/Option or Command/Win modifier".into());
         }
         if !targets.insert((binding.display.clone(), binding.value)) {
-            return Err("同一个输入源只能设置一个快捷键".into());
+            return Err("Each input can only have one shortcut".into());
         }
         if parsed
             .insert(hotkey.id(), (hotkey, binding.clone()))
             .is_some()
         {
-            return Err(format!("快捷键 {} 重复，请选择其他组合", binding.shortcut));
+            return Err(format!("Shortcut {} is duplicated, choose a different combination", binding.shortcut));
         }
     }
     Ok(parsed)
@@ -103,7 +103,7 @@ impl Shortcuts {
                     let _ = self.manager.unregister(key);
                 }
                 return Err(format!(
-                    "无法注册 {}，可能已被占用：{error}",
+                    "Cannot register {}, it may already be in use: {error}",
                     binding.shortcut
                 ));
             }
@@ -156,7 +156,7 @@ fn restore_with(
         Ok(())
     } else {
         Err(format!(
-            "部分快捷键不可用，其他快捷键仍有效：{}",
+            "Some shortcuts are unavailable, others still work: {}",
             failures.join("；")
         ))
     }
